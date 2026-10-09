@@ -1,0 +1,2 @@
+E:/Github/newwebrtc/webrtc/src/modules/desktop_capture/desktop_frame.cc: CopyPlane
+E:/Github/newwebrtc/webrtc/src/modules/desktop_capture/desktop_frame_rotation.cc: ARGBRotate, RotationMode, kRotate0, kRotate180, kRotate270, kRotate90

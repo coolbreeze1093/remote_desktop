@@ -1,0 +1,8 @@
+== .cc 直接 include 的 absl 头 ==
+modules/desktop_capture/win/full_screen_win_application_handler.cc: absl/strings/ascii.h
+modules/desktop_capture/win/full_screen_win_application_handler.cc: absl/strings/match.h
+
+== modules/desktop_capture 头文件直接 include 的 absl 头 ==
+modules/desktop_capture/linux/wayland/shared_screencast_stream.h: absl/types/optional.h
+modules/desktop_capture/linux/x11/shared_x_display.h: absl/strings/string_view.h
+modules/desktop_capture/win/wgc_capture_source.h: absl/types/optional.h
