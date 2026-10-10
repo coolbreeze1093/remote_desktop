@@ -6,7 +6,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
-#include <QSplitter>
+
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QVBoxLayout>
@@ -184,9 +184,6 @@ QWidget* MainWindow::makeHostTab() {
 }
 
 QWidget* MainWindow::makeViewerTab() {
-  auto* root = new QWidget(this);
-  splitter_ = new QSplitter(Qt::Vertical, root);
-
   // Embedded live preview: visible on the Viewer tab itself so same-machine
   // testing does not depend on the fullscreen popup (which would otherwise
   // mirror the captured screen into itself). Double-click pops the fullscreen
@@ -195,19 +192,8 @@ QWidget* MainWindow::makeViewerTab() {
   viewerPreview_->setToolTip(tr("双击打开/关闭全屏远端画面窗口"));
   connect(viewerPreview_, &VideoWidget::inputEvent, this,
           &MainWindow::sendInputEvent);
-  connect(viewerPreview_, &VideoWidget::doubleClicked, this, [this] {
-    if (videoWindow_->isVisible()) {
-      videoWindow_->close();
-    } else {
-      videoWindow_->showFullscreen();
-      splitter_->removeWidget(viewerPreview_);
-    }
-  });
-  connect(viewerPreview_, &VideoWidget::close, this, [this] {
-    splitter_->addWidget(viewerPreview_);
-  });
 
-  auto* panel = new QWidget(splitter_);
+  auto* panel = new QWidget();
   auto* lay = new QVBoxLayout(panel);
 
   // Quality selector: 0=auto (adaptive ladder), 1=超清(native), 2=高清,
@@ -252,11 +238,8 @@ QWidget* MainWindow::makeViewerTab() {
   connect(viewerConnectBtn_, &QPushButton::clicked, this,
           &MainWindow::onViewerConnect);
 
-  splitter_->addWidget(viewerPreview_);
-  splitter_->addWidget(panel);
-  splitter_->setStretchFactor(0, 3);
-  splitter_->setStretchFactor(1, 2);
-  return splitter_;
+
+  return panel;
 }
 
 void MainWindow::setStatus(const QString& text) {
@@ -322,6 +305,7 @@ void MainWindow::onViewerConnect() {
     return;
   }
   setStatus(tr("正在连接..."));
+  viewerPreview_->show();
 }
 
 }  // namespace rd

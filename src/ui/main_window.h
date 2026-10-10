@@ -4,7 +4,7 @@
 
 #include <QMainWindow>
 #include <QPlainTextEdit>
-
+#include <QSplitter>
 #include "session/remote_desktop_session.h"
 #include "ui/video_widget.h"
 
