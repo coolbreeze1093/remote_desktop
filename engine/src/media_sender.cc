@@ -1,28 +1,32 @@
-#include "net/h264_stream_sender.h"
+// rdc — 把 H.264 Annex-B access unit 经 rtc::Track 发送（H264RtpPacketizer，
+// 一次一个 AU，90kHz 时钟）。自旧 net/h264_stream_sender.cc 原样迁移。
+#include "media_sender.h"
 
 #include <algorithm>
 
-namespace rd {
+#include "rdc/log.h"
 
-void H264StreamSender::attach(std::shared_ptr<rtc::Track> track,
-                              std::function<void()> onPli) {
+namespace rdc {
+
+void MediaSender::attach(std::shared_ptr<rtc::Track> track,
+                         std::function<void()> onPli) {
   std::lock_guard<std::mutex> lock(mtx_);
   track_ = track;
   if (!track_) {
     return;
   }
-  // SSRC/CNAME are arbitrary locally; the packetizer stamps RTP headers.
+  // SSRC/CNAME 本地随意；RTP 头由打包器盖章。
   auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
       /*ssrc=*/42, "remote-desktop", /*payloadType=*/96,
       /*clockRate=*/rtc::H264RtpPacketizer::ClockRate);
   packetizer_ = std::make_shared<rtc::H264RtpPacketizer>(
       rtc::NalUnit::Separator::LongStartSequence, rtpConfig);
-  // NACK retransmission: UDP loss on the IDR would otherwise leave the viewer
-  // black until the next periodic keyframe.
+  // NACK 重传：IDR 的 UDP 丢包否则会让 Viewer 黑屏到下一个周期关键帧。
   packetizer_->addToChain(std::make_shared<rtc::RtcpNackResponder>());
-  // Answer PLI/FIR keyframe requests from the receiver.
+  // 应答接收方的 PLI/FIR 关键帧请求。
   if (onPli) {
-    packetizer_->addToChain(std::make_shared<rtc::PliHandler>(std::move(onPli)));
+    packetizer_->addToChain(
+        std::make_shared<rtc::PliHandler>(std::move(onPli)));
   }
   track_->setMediaHandler(packetizer_);
   startTime_ = std::chrono::steady_clock::now();
@@ -30,7 +34,7 @@ void H264StreamSender::attach(std::shared_ptr<rtc::Track> track,
   openTransition_ = false;
 }
 
-void H264StreamSender::detach() {
+void MediaSender::detach() {
   std::shared_ptr<rtc::Track> track;
   {
     std::lock_guard<std::mutex> lock(mtx_);
@@ -45,12 +49,12 @@ void H264StreamSender::detach() {
   }
 }
 
-bool H264StreamSender::attached() const {
+bool MediaSender::attached() const {
   std::lock_guard<std::mutex> lock(mtx_);
   return static_cast<bool>(track_);
 }
 
-bool H264StreamSender::consumeOpenTransition() {
+bool MediaSender::consumeOpenTransition() {
   std::lock_guard<std::mutex> lock(mtx_);
   if (openTransition_) {
     openTransition_ = false;
@@ -59,7 +63,7 @@ bool H264StreamSender::consumeOpenTransition() {
   return false;
 }
 
-void H264StreamSender::send(const std::vector<uint8_t>& annexB, bool keyframe) {
+void MediaSender::send(const std::vector<uint8_t>& annexB, bool keyframe) {
   (void)keyframe;
   std::shared_ptr<rtc::Track> track;
   std::shared_ptr<rtc::H264RtpPacketizer> packetizer;
@@ -70,7 +74,7 @@ void H264StreamSender::send(const std::vector<uint8_t>& annexB, bool keyframe) {
     }
     const bool open = track_->isOpen();
     if (open && !wasOpen_) {
-      openTransition_ = true;  // picked up by the next onFrame
+      openTransition_ = true;  // 下一次 onFrame 处理
     }
     wasOpen_ = open;
     if (!open) {
@@ -78,18 +82,15 @@ void H264StreamSender::send(const std::vector<uint8_t>& annexB, bool keyframe) {
     }
     if (!loggedOpen_) {
       loggedOpen_ = true;
-      fprintf(stderr, "[sender] first send on open track\n");
-      fflush(stderr);
+      rdcDebug("sender", "first send on open track");
     }
-    // Keep the objects alive for the duration of the send even if detach()
-    // runs concurrently.
+    // 即使 detach() 并发发生，也要让对象活过这次 send。
     track = track_;
     packetizer = packetizer_;
   }
-  // Advance the 90 kHz timestamp from wall clock, then hand the raw Annex-B
-  // access unit to the track: Track::send runs the media-handler chain, so
-  // the packetizer fragments it into RTP packets and transports them.
-  // (Calling packetizer_->outgoing() manually here would packetize twice.)
+  // 90kHz 时间戳按墙钟推进，然后把裸 Annex-B AU 交给 track：Track::send 会
+  // 跑媒体处理器链，打包器拆成 RTP 包并送传输。
+  // （手动调 packetizer_->outgoing() 会打包两次。）
   const auto now = std::chrono::steady_clock::now();
   const double elapsedSec =
       std::chrono::duration<double>(now - startTime_).count();
@@ -102,15 +103,14 @@ void H264StreamSender::send(const std::vector<uint8_t>& annexB, bool keyframe) {
                                                          annexB.size()));
   const bool sent = track->send(std::move(payload));
   if (!sent || sentCount_ < 3) {
-    fprintf(stderr, "[sender] send #%d size=%zu ret=%d\n", ++sentCount_,
-            annexB.size(), (int)sent);
-    fflush(stderr);
+    rdcDebug("sender", "send #%d size=%zu ret=%d", ++sentCount_, annexB.size(),
+             (int)sent);
   } else {
     ++sentCount_;
   }
 }
 
-uint32_t H264StreamSender::rtpTimestamp() const {
+uint32_t MediaSender::rtpTimestamp() const {
   std::lock_guard<std::mutex> lock(mtx_);
   if (!packetizer_) {
     return 0;
@@ -118,4 +118,4 @@ uint32_t H264StreamSender::rtpTimestamp() const {
   return packetizer_->rtpConfig->timestamp;
 }
 
-}  // namespace rd
+}  // namespace rdc

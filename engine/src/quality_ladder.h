@@ -1,32 +1,30 @@
-// remote_desktop — adaptive video quality ladder.
+// rdc — 自适应画质阶梯（自旧 session/video_quality.h 原样迁移，rdDebug ->
+// rdcDebug）。
 //
-// The captured (native) monitor size defines three levels:
-//   0 流畅  = 1/2 scale, ~4 Mbps
-//   1 高清  = 3/4 scale, ~12 Mbps
-//   2 超清  = full scale, ~24 Mbps
-// Auto mode starts at the sharpest and steps down on pressure (slow encode,
-// decoder-reported loss, bandwidth starvation), climbing back after a clean
-// streak. Manual modes pin a level.
+// 采集显示器的原生尺寸定义三档：
+//   0 流畅 = 1/2 缩放 ~4Mbps 24fps
+//   1 高清 = 3/4 缩放 ~12Mbps 12fps
+//   2 超清 = 原生     ~24Mbps 8fps
+// 自动档从最清晰起步，遇压力降档（编码慢 / 解码端丢包 / 带宽不足），链路
+// 干净 12 秒后回升；手动模式钉死档位。
 //
-// Threading: all methods run on the encoder thread (hostLoop consumer loop);
-// the UI thread only feeds mode/stats through RemoteDesktopSession's atomics,
-// which the per-second evaluate() tick drains.
-#ifndef REMOTE_DESKTOP_SESSION_VIDEO_QUALITY_H_
-#define REMOTE_DESKTOP_SESSION_VIDEO_QUALITY_H_
+// 线程：所有方法只在引擎编码线程上跑；Viewer 统计由控制线程经原子变量喂入，
+// 由每秒一次的 evaluate() tick 消耗。
+#ifndef RDC_SRC_QUALITY_LADDER_H_
+#define RDC_SRC_QUALITY_LADDER_H_
 
 #include <algorithm>
-#include <cstdint>
 
-#include "../debug_log.h"
+#include "rdc/log.h"
 
-namespace rd {
+namespace rdc {
 
-class VideoQualityController {
+class QualityLadder {
  public:
   static constexpr int kLevels = 3;
 
-  // User-facing mode (Viewer UI): 0=auto, 1=超清, 2=高清, 3=流畅.
-  // Returns the pinned level, or -1 for auto.
+  // 用户视角模式（Viewer UI）：0=auto 1=超清 2=高清 3=流畅。返回钉死档位，
+  // auto 返回 -1。
   static int levelForMode(int mode) {
     switch (mode) {
       case 1: return 2;
@@ -41,26 +39,22 @@ class VideoQualityController {
     return kKbps[std::min(level, kLevels - 1)];
   }
 
-  // Encode fps per level: sharper levels trade frame rate for pixels so a
-  // single-threaded encoder can keep up (screen content tolerates low fps;
-  // input injection is not throttled by this).
+  // 每档编码帧率：越清晰的档位用帧率换像素，单线程编码器才跟得上（屏幕
+  // 内容低帧率可用；鼠标键盘注入不受帧率影响）。
   static int fpsFor(int level) {
     static const int kFps[kLevels] = {24, 12, 8};
     return kFps[std::min(level, kLevels - 1)];
   }
 
-  // Per-frame pipeline budget (ms) used by the auto policy.
-  static double budgetMsFor(int level) {
-    return 1000.0 / fpsFor(level);
-  }
+  // 自动策略用的每帧流水线预算（ms）。
+  static double budgetMsFor(int level) { return 1000.0 / fpsFor(level); }
 
   void setNativeSize(int w, int h) {
     nativeW_ = w;
     nativeH_ = h;
   }
 
-  // Even-rounded encode size for the level (chroma needs /2, OpenH264 needs
-  // even dims).
+  // 档位对应的编码尺寸（偶数对齐：色度需 /2，OpenH264 要求偶数尺寸）。
   void sizeFor(int level, int* w, int* h) const {
     static const double kScale[kLevels] = {0.5, 0.75, 1.0};
     const int maxW = nativeW_ > 0 ? nativeW_ : 1280;
@@ -69,12 +63,12 @@ class VideoQualityController {
     *h = std::max(360, static_cast<int>(maxH * kScale[level]) & ~1);
   }
 
-  // Per-frame pipeline cost (convert+encode+send), ms. EMA.
+  // 每帧流水线耗时（转换+编码+发送），ms，EMA。
   void onEncodedFrame(double pipelineMs) {
     emaMs_ = emaMs_ < 0 ? pipelineMs : emaMs_ * 0.9 + pipelineMs * 0.1;
   }
 
-  // Viewer per-second deltas (drained from session atomics).
+  // Viewer 每秒统计增量（引擎从原子变量收集后喂入）。
   void onViewerStats(int recvDelta, int decDelta, int failDelta) {
     statSeen_ = true;
     lastRecv_ = recvDelta;
@@ -82,8 +76,8 @@ class VideoQualityController {
     lastFail_ = failDelta;
   }
 
-  // Called once per second from the capture loop. `encodedLastSecond` is how
-  // many AUs went out in the same window; returns the desired level.
+  // 每秒调用一次（编码循环 tick）。encodedLastSecond 是同窗口发出的 AU 数；
+  // 返回期望档位。
   int evaluate(int mode, int encodedLastSecond) {
     const int manual = levelForMode(mode);
     if (manual >= 0) {
@@ -93,22 +87,21 @@ class VideoQualityController {
       return level_;
     }
 
-    // CPU pressure: per-frame cost beyond the current level's budget.
+    // CPU 压力：每帧耗时超出当前档预算。
     if (emaMs_ > budgetMsFor(level_) && level_ > 0) {
       setLevel(level_ - 1, "encode slow");
       return level_;
     }
 
     if (statSeen_ && cooldown_ == 0) {
-      // Decoder-reported loss: real packet loss, or the resolution-change
-      // frames right after a ladder switch (grace period covers those).
+      // 解码端丢包：真实丢包，或档位切换后的分辨率变更帧（宽限期已覆盖）。
       if (graceTicks_ > 0) {
         --graceTicks_;
       } else if (lastFail_ > 0 && level_ > 0) {
         setLevel(level_ - 1, "decoder loss");
         return level_;
       }
-      // Bandwidth starvation: significantly fewer frames arrived than sent.
+      // 带宽不足：收到的帧明显少于发出的帧。
       if (lastRecv_ + 5 < encodedLastSecond && level_ > 0) {
         setLevel(level_ - 1, "bandwidth");
         return level_;
@@ -120,8 +113,8 @@ class VideoQualityController {
       return level_;
     }
 
-    // Climb back up after a sustained clean period (80% of the next level's
-    // budget so we don't step up into immediate CPU pressure).
+    // 链路持续干净后回升（用下一档预算的 80% 门槛，避免升档立即触发 CPU
+    // 压力来回震荡）。
     if (statSeen_ && lastFail_ == 0 && lastRecv_ + 5 >= encodedLastSecond &&
         emaMs_ >= 0 && emaMs_ < budgetMsFor(level_ + 1) * 0.8 &&
         level_ < kLevels - 1) {
@@ -141,15 +134,15 @@ class VideoQualityController {
   void setLevel(int l, const char* why) {
     int w, h;
     sizeFor(l, &w, &h);
-    rdDebug("quality", "level %d -> %d (%s) %dx%d @%dkbps %dfps ema=%.1fms",
-            level_, l, why, w, h, bitrateKbpsFor(l), fpsFor(l), emaMs_);
+    rdcDebug("quality", "level %d -> %d (%s) %dx%d @%dkbps %dfps ema=%.1fms",
+             level_, l, why, w, h, bitrateKbpsFor(l), fpsFor(l), emaMs_);
     level_ = l;
-    cooldown_ = 3;    // seconds before the next auto change
-    graceTicks_ = 3;  // tolerate decoder resolution-change failures
+    cooldown_ = 3;    // 下次自动变更前的冷却秒数
+    graceTicks_ = 3;  // 容忍分辨率切换导致的解码失败
     cleanTicks_ = 0;
   }
 
-  int level_ = kLevels - 1;  // auto starts at the sharpest
+  int level_ = kLevels - 1;  // auto 从最清晰起步
   int nativeW_ = 0;
   int nativeH_ = 0;
   double emaMs_ = -1.0;
@@ -162,6 +155,5 @@ class VideoQualityController {
   int cleanTicks_ = 0;
 };
 
-}  // namespace rd
-
-#endif
+}  // namespace rdc
+#endif  // RDC_SRC_QUALITY_LADDER_H_

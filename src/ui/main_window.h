@@ -36,6 +36,10 @@ class MainWindow : public QMainWindow {
   void setStatus(const QString& text);
   void updateDiag();
   void sendInputEvent(const rd::InputEvent& ev);
+  // 本机输入桌面切到/离开安全桌面（锁屏/UAC）时的 Host tab 提示。
+  void applyHostLockHint(bool secure, bool capturable);
+  // 以管理员身份重启本程序（锁屏/UAC 采集与控制需要提权）。
+  void onHostElevateRestart();
 
   RemoteDesktopSession* session_ = nullptr;
   QTimer* diagTimer_ = nullptr;
@@ -51,6 +55,8 @@ class MainWindow : public QMainWindow {
   QPushButton* hostAnswerBtn_ = nullptr;
   QPushButton* hostStartBtn_ = nullptr;
   QLabel* hostState_ = nullptr;
+  QLabel* hostLockHint_ = nullptr;      // 锁屏/提权状态提示
+  QPushButton* hostElevateBtn_ = nullptr;
   int64_t hostScreenId_ = 0;
 
   // Viewer widgets
@@ -61,6 +67,7 @@ class MainWindow : public QMainWindow {
   QPushButton* viewerOfferBtn_ = nullptr;
   QPushButton* viewerConnectBtn_ = nullptr;
   QLabel* viewerState_ = nullptr;
+  QLabel* viewerLockHint_ = nullptr;    // 宿主侧锁屏状态提示（操作者可见）
   QSplitter* splitter_ = nullptr;
 };
 

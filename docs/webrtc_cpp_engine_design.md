@@ -1,5 +1,32 @@
 # 设计：纯 C++ WebRTC 引擎（rdc）——对外 API + 回调，收输入事件、吐视频帧
 
+> **实施状态（2026-10）**：P1/P2/P3 已全部落地并通过验证；P4（C ABI）待定。
+> 验证结果：`rdc_protocol_test` 全过；`rd_self_test` 连续两次 PASS（连接、80 帧
+> 解码、输入注入）；`rd_pair_test` 双进程双端 PASS（host 编 120 发 120，viewer
+> 收 118 解 118 失败 0）；CLI demo 全链路通过（host 采集 439/编 145/发 145/
+> 注入 15，viewer 收 121 解 121 失败 0，首帧 BMP 落盘有效）。
+>
+> 实施中的偏离与补充（以代码为准）：
+> 1. `quality_ladder` 为单头文件（逻辑同旧 `video_quality.h`）。
+> 2. 引擎只启一条派发线程，同时承载 OnInput/OnState/OnError/OnQualityChanged/
+>    OnRemoteStats（设计中的"控制线程/事件线程"合一，顺序保证不变）。
+> 3. libyuv 以与 screen_capture_lib 完全相同的文件集与开关编入 `rdc_yuv`
+>    静态库挂接 rdc —— 引擎自包含，仅链 rdc 的宿主（如 CLI viewer）也能解析
+>    转换符号；与 screen_capture 共存时两份目标文件符号集一致，链接器先到先得。
+> 4. libdatachannel 在持有内部锁的状态下派发 onTrack，回调内直接
+>    `setMediaHandler` 会自锁（shared_mutex EDEADLK）：attach 必须转投引擎
+>    派发线程（旧 Qt 代码靠跳 Qt 线程规避，同理）。
+> 5. Qt 适配层把 SDP 阻塞调用放工作线程 + QEventLoop 泵事件保 UI 响应；
+>    工作线程只跑纯 std::string 的引擎调用，不碰 Qt 对象（mingw 版 Qt 在
+>    非 Qt 线程上构造 QString 会走 TLS 析构链，实测引发堆损坏崩溃）。
+> 6. 适配器每次 startHost/startViewer 重建 alive_ 守卫（修复旧代码重启会话后
+>    回调被旧标志拦掉的问题）。
+> 7. GUI/测试目标链接顺序统一 rdc 在 screen_capture 之前。
+> 8. src 内重复实现已彻底清理：`core/openh264_codec`、`core/i420_frame` 删除
+>    （`rd_enc_test` 迁移为链接 rdc 使用引擎封装），死文件 `repro_yuv*.cc` 删除；
+>    日志实现合一 —— 引擎公开 `rdc/log.h`，`src/debug_log.h` 只是别名（同一份
+>    exe 旁 rd_debug.log）；src/CMakeLists 不再直连 openh264/libyuv。
+
 > 目标：把本工程所有 WebRTC 相关能力从 Qt 中剥离，做成纯 C++17 静态库 **`rdc`**
 > （remote_desktop core engine）。宿主程序（Qt GUI / CLI / 测试程序）只看到
 > 一组普通 C++ 接口和回调：**鼠标键盘事件进、视频帧出**，不感知任何 Qt 类型。

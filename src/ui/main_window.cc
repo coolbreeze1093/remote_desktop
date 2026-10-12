@@ -18,8 +18,18 @@
 
 #include <screen_capture/capture.hpp>
 
+#include "core/input_desktop.h"
 #include "debug_log.h"
 #include "ui/remote_video_window.h"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shellapi.h>  // ShellExecuteW（提权重启；LEAN_AND_MEAN 不含 shellapi）
 
 namespace rd {
 
@@ -60,6 +70,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   // Forward mouse/keyboard on the remote video to the host.
   connect(videoWindow_, &RemoteVideoWindow::inputEvent, this,
           &MainWindow::sendInputEvent);
+
+  // 本机锁屏/UAC 状态（采集线程触发；queued 到 UI 线程）。
+  connect(session_, &RemoteDesktopSession::hostSecureDesktopChanged, this,
+          &MainWindow::applyHostLockHint);
+  // 宿主锁屏状态（引擎派发线程触发）：操作者在主控端看到的反馈。
+  connect(session_, &RemoteDesktopSession::peerSecureDesktopChanged, this,
+          [this](bool secure, bool capturable) {
+            if (!secure) {
+              viewerLockHint_->hide();
+              return;
+            }
+            if (capturable) {
+              viewerLockHint_->setText(
+                  tr("被控端已锁屏 — 正在捕获锁屏画面，输入已切到安全桌面"));
+              viewerLockHint_->setStyleSheet("color: #2e7d32;");
+            } else {
+              viewerLockHint_->setText(
+                  tr("被控端已锁屏 — 被控端未以管理员运行，无法捕获/控制"
+                     "锁屏；解锁后自动恢复"));
+              viewerLockHint_->setStyleSheet("color: #c62828;");
+            }
+            viewerLockHint_->show();
+          });
 
   auto* tabs = new QTabWidget(this);
   tabs->addTab(makeHostTab(), tr("被控端 (Host)"));
@@ -129,9 +162,7 @@ void MainWindow::sendInputEvent(const rd::InputEvent& ev) {
   if (dbg.fetch_add(1) < 10) {
     rdDebug("mainwin", "inputEvent type=%d -> sendInput", (int)ev.type);
   }
-  if (session_->control()) {
-    session_->control()->sendInput(ev);
-  }
+  session_->sendInput(ev);
 }
 
 QWidget* MainWindow::makeHostTab() {
@@ -170,6 +201,19 @@ QWidget* MainWindow::makeHostTab() {
   btnRow->addWidget(hostAnswerBtn_);
   btnRow->addWidget(hostStartBtn_);
   lay->addLayout(btnRow);
+
+  // 锁屏/UAC（安全桌面）提示与提权入口：未提权进程打不开安全桌面，
+  // 锁屏后画面与控制中断；提权后 GDI 可捕获锁屏、SendInput 可注入。
+  hostLockHint_ = new QLabel(root);
+  hostLockHint_->setWordWrap(true);
+  hostLockHint_->hide();
+  lay->addWidget(hostLockHint_);
+  hostElevateBtn_ = new QPushButton(tr("以管理员身份重启"), root);
+  hostElevateBtn_->setToolTip(
+      tr("锁屏/UAC 时的采集与控制需要管理员权限；重启后需重新交换 SDP。"));
+  connect(hostElevateBtn_, &QPushButton::clicked, this,
+          &MainWindow::onHostElevateRestart);
+  lay->addWidget(hostElevateBtn_);
 
   lay->addWidget(new QLabel(tr("你的 Answer（复制发给主控端）:"), root));
   hostAnswer_ = new QPlainTextEdit(root);
@@ -214,6 +258,12 @@ QWidget* MainWindow::makeViewerTab() {
 
   viewerState_ = new QLabel(tr("1) 创建 Offer 发给被控端，2) 粘贴 Answer 并连接"), panel);
   lay->addWidget(viewerState_);
+
+  // 宿主侧锁屏/UAC 状态提示（锁屏期间画面冻结时的原因说明）。
+  viewerLockHint_ = new QLabel(panel);
+  viewerLockHint_->setWordWrap(true);
+  viewerLockHint_->hide();
+  lay->addWidget(viewerLockHint_);
 
   lay->addWidget(new QLabel(tr("你的 Offer（复制发给被控端）:"), panel));
   viewerOffer_ = new QPlainTextEdit(panel);
@@ -269,6 +319,7 @@ void MainWindow::onHostGenerateAnswer() {
   }
   hostAnswer_->setPlainText(answer);
   hostStartBtn_->setEnabled(true);
+  applyHostLockHint(false, true);  // 启动即预检：未提权时给出常驻提醒
   setStatus(tr("Answer 已生成 — 复制给主控端，连接建立后将自动推流"));
 }
 
@@ -306,6 +357,50 @@ void MainWindow::onViewerConnect() {
   }
   setStatus(tr("正在连接..."));
   viewerPreview_->show();
+}
+
+void MainWindow::applyHostLockHint(bool secure, bool capturable) {
+  if (!hostLockHint_) {
+    return;
+  }
+  if (secure) {
+    if (capturable) {
+      hostLockHint_->setText(
+          tr("已锁屏 — 正在捕获安全桌面（锁屏画面与输入正常）"));
+      hostLockHint_->setStyleSheet("color: #2e7d32;");
+    } else {
+      hostLockHint_->setText(
+          tr("已锁屏 — 本进程打不开安全桌面（需管理员运行），画面与控制"
+             "已中断；解锁后自动恢复"));
+      hostLockHint_->setStyleSheet("color: #c62828;");
+    }
+    hostLockHint_->show();
+    return;
+  }
+  // 未锁屏：仅未提权时保留常驻提醒（提权下隐藏）。
+  hostLockHint_->setStyleSheet("color: #8a6d3b;");
+  if (rd::CanOpenSecureDesktop()) {
+    hostLockHint_->hide();
+  } else {
+    hostLockHint_->setText(
+        tr("未以管理员运行：锁屏/UAC 期间无法查看与控制；需要时点"
+           "\"以管理员身份重启\""));
+    hostLockHint_->show();
+  }
+}
+
+void MainWindow::onHostElevateRestart() {
+  wchar_t exePath[MAX_PATH] = {};
+  GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+  const HINSTANCE r = ShellExecuteW(nullptr, L"runas", exePath, nullptr,
+                                    nullptr, SW_SHOWNORMAL);
+  if (reinterpret_cast<INT_PTR>(r) > 32) {
+    // 新实例已提权启动，退出当前实例；两侧需重新交换 SDP。
+    session_->stop();
+    close();
+  } else {
+    setStatus(tr("未以管理员身份重启（已取消或失败）"));
+  }
 }
 
 }  // namespace rd

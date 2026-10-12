@@ -12,6 +12,8 @@
 #include <QMainWindow>
 #include <QTimer>
 
+#include <rtc/rtc.hpp>
+
 #include "session/remote_desktop_session.h"
 #include "ui/remote_video_window.h"
 

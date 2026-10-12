@@ -1,10 +1,10 @@
-#include "core/openh264_codec.h"
+#include "video_codec.h"
 
 #include <cstring>
 
 #include "codec_api.h"
 
-namespace rd {
+namespace rdc {
 
 // ----------------------------------------------------------------- encoder
 
@@ -65,7 +65,8 @@ void H264Encoder::close() {
   bitrateKbps_ = 0;
 }
 
-std::vector<uint8_t> H264Encoder::encode(const I420Frame& frame, bool forceKey) {
+std::vector<uint8_t> H264Encoder::encode(const I420Buffer& frame,
+                                         bool forceKey) {
   if (!encoder_ || frame.width != width_ || frame.height != height_) {
     return {};
   }
@@ -141,11 +142,8 @@ void H264Decoder::close() {
   }
 }
 
-bool H264Decoder::decode(const uint8_t* data, size_t size, I420Frame& out,
-                         std::vector<uint8_t>& yBuf,
-                         std::vector<uint8_t>& uBuf,
-                         std::vector<uint8_t>& vBuf, int& yStride,
-                         int& uvStride) {
+bool H264Decoder::decode(const uint8_t* data, size_t size, I420Buffer& out,
+                         int* yStride, int* uvStride) {
   if (!decoder_ || !data || size == 0) {
     return false;
   }
@@ -169,27 +167,31 @@ bool H264Decoder::decode(const uint8_t* data, size_t size, I420Frame& out,
   }
 
   // Copy out of the decoder's internal buffer.
-  yBuf.resize(static_cast<size_t>(strideY) * h);
-  uBuf.resize(static_cast<size_t>(strideUV) * ((h + 1) / 2));
-  vBuf.resize(static_cast<size_t>(strideUV) * ((h + 1) / 2));
+  out.width = w;
+  out.height = h;
+  out.y.resize(static_cast<size_t>(strideY) * h);
+  out.u.resize(static_cast<size_t>(strideUV) * ((h + 1) / 2));
+  out.v.resize(static_cast<size_t>(strideUV) * ((h + 1) / 2));
   for (int r = 0; r < h; ++r) {
-    memcpy(yBuf.data() + static_cast<size_t>(r) * strideY,
-           pData[0] + static_cast<size_t>(r) * strideY, static_cast<size_t>(w));
+    memcpy(out.y.data() + static_cast<size_t>(r) * strideY,
+           pData[0] + static_cast<size_t>(r) * strideY,
+           static_cast<size_t>(w));
   }
   for (int r = 0; r < (h + 1) / 2; ++r) {
-    memcpy(uBuf.data() + static_cast<size_t>(r) * strideUV,
+    memcpy(out.u.data() + static_cast<size_t>(r) * strideUV,
            pData[1] + static_cast<size_t>(r) * strideUV,
            static_cast<size_t>((w + 1) / 2));
-    memcpy(vBuf.data() + static_cast<size_t>(r) * strideUV,
+    memcpy(out.v.data() + static_cast<size_t>(r) * strideUV,
            pData[2] + static_cast<size_t>(r) * strideUV,
            static_cast<size_t>((w + 1) / 2));
   }
-  yStride = strideY;
-  uvStride = strideUV;
-
-  out.width = w;
-  out.height = h;
+  if (yStride) {
+    *yStride = strideY;
+  }
+  if (uvStride) {
+    *uvStride = strideUV;
+  }
   return true;
 }
 
-}  // namespace rd
+}  // namespace rdc

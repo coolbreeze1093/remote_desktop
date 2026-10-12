@@ -3,7 +3,9 @@
 #include <windows.h>
 
 #include <atomic>
+#include <string>
 
+#include "core/input_desktop.h"
 #include "debug_log.h"
 
 namespace rd {
@@ -22,6 +24,22 @@ bool InputInjector::inject(const InputEvent& ev) const {
   const int fh = fh_.load(std::memory_order_relaxed);
   if (fw <= 0 || fh <= 0) {
     return false;
+  }
+
+  // 锁屏/UAC 时输入桌面切到安全桌面（Winlogon），SendInput 只会落到调用
+  // 线程所属桌面的输入流：先把注入线程附着到当前输入桌面。管理员进程跟随
+  // 切换后可控制锁屏；未提权进程打不开安全桌面（kOpenDenied），注入失效。
+  // 按线程缓存，桌面未变时只有一次探测开销。
+  {
+    std::wstring desktopName;
+    const AttachResult att = AttachThisThreadToInputDesktop(&desktopName);
+    static std::atomic<int> attDbg{0};
+    if (att != AttachResult::kOnInputDesktop && attDbg.fetch_add(1) < 20) {
+      // 桌面名（Default/Winlogon）都是 ASCII，窄化仅用于日志。
+      const std::string narrow(desktopName.begin(), desktopName.end());
+      rdDebug("inject", "attach input desktop failed (%d) name=%s", (int)att,
+              narrow.c_str());
+    }
   }
 
   // Normalised frame position -> pixel position in the captured frame ->

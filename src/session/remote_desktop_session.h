@@ -1,96 +1,77 @@
-// remote_desktop — orchestrates capture/encode/send (host) and receive/
-// decode (viewer) on top of PeerSession, ControlChannel and the video layer.
+// remote_desktop — Qt 侧薄适配器：把 rdc 引擎的回调/接口映射为 Qt 信号。
+//
+// 本类曾经身兼采集/编码/解码/传输/画质全流程；引擎（rdc）落地后只剩：
+//   - 持有 rdc::Engine 并接线回调（状态/错误 → Qt 信号）
+//   - 采集线程（ScreenCaptureThread）把帧推进引擎
+//   - Host 端收输入事件 → InputInjector 注入（Win32 留在宿主层）
+//   - Viewer 端收解码帧 → I420→QImage → frameReady 信号
+//   - SDP 阻塞调用期间用 QEventLoop 泵事件，保持 UI 响应
 #ifndef REMOTE_DESKTOP_SESSION_REMOTE_DESKTOP_SESSION_H_
 #define REMOTE_DESKTOP_SESSION_REMOTE_DESKTOP_SESSION_H_
 
 #include <atomic>
-#include <condition_variable>
-#include <deque>
+#include <cstdint>
+#include <functional>
 #include <memory>
-#include <mutex>
-#include <thread>
-#include <vector>
 
 #include <QImage>
 #include <QObject>
+#include <QString>
 
-#include <rtc/rtc.hpp>
-
-#include "core/i420_frame.h"
 #include "core/input_event.h"
 #include "core/input_injector.h"
-#include "core/openh264_codec.h"
-#include "net/control_channel.h"
-#include "net/h264_stream_sender.h"
-#include "net/peer_session.h"
-#include "session/video_quality.h"
+#include "session/screen_capture_thread.h"
 
-class QTimer;
+namespace rdc {
+class Engine;
+}
 
 namespace rd {
 
-class ScreenCaptureThread;
 struct SelfTestHooks;  // test-only backdoor, defined in self_test.cc
 
 class RemoteDesktopSession : public QObject {
   Q_OBJECT
-  friend struct SelfTestHooks;
  public:
   enum class Role { None, Host, Viewer };
 
-  // Pipeline counters (the UI polls these to localise "no picture" faults:
-  // capture → encode → send → receive → decode → display).
+  // 管道计数器（UI 轮询用，口径与引擎 Stats 一致：捕获→编码→发送→
+  // 接收→解码→显示）。
   struct DiagStats {
-    uint32_t captured = 0;      // host: frames pulled from screen_capture_lib
-    uint32_t encoded = 0;       // host: non-empty encoder output
-    uint32_t sent = 0;          // host: access units handed to the track
-    uint32_t dropped = 0;       // host: frames dropped, encode queue was full
-    uint32_t received = 0;      // viewer: depacketized frames from the track
-    uint32_t decoded = 0;       // viewer: frames that produced a QImage
-    uint32_t decodeFailed = 0;  // viewer: frames OpenH264 could not decode
-    int qualityLevel = -1;      // host: active ladder level (0..2)
-    int encodeWidth = 0;        // host: current encode size
+    uint32_t captured = 0;
+    uint32_t encoded = 0;
+    uint32_t sent = 0;
+    uint32_t dropped = 0;
+    uint32_t received = 0;
+    uint32_t decoded = 0;
+    uint32_t decodeFailed = 0;
+    int qualityLevel = -1;
+    int encodeWidth = 0;
     int encodeHeight = 0;
-    int encodeMs = 0;           // host: EMA per-frame pipeline cost
+    int encodeMs = 0;
   };
 
   explicit RemoteDesktopSession(QObject* parent = nullptr);
   ~RemoteDesktopSession() override;
 
-  // --- Host (controlled machine) ---
+  // --- Host（被控端）---
   bool startHost(int64_t screenId);
-  QString hostAcceptOffer(const QString& offerSdp);  // returns answer SDP
-  // Convenience for the UI: startHost + apply the offer; on any failure the
-  // session is reset (stop()) so the user can retry, and {} is returned.
+  QString hostAcceptOffer(const QString& offerSdp);  // 返回 answer SDP
+  // UI 便捷封装：startHost + 应用 offer；任何失败都会 stop() 便于重试。
   QString hostAcceptOfferChecked(const QString& offerSdp, int64_t screenId);
 
-  // --- Viewer (controlling machine) ---
+  // --- Viewer（主控端）---
   bool startViewer();
-  QString viewerCreateOffer();                   // returns offer SDP
+  QString viewerCreateOffer();  // 返回 offer SDP
   bool viewerAcceptAnswer(const QString& answerSdp);
 
   void stop();
 
   Role role() const { return role_; }
-  PeerSession* peer() const { return peer_.get(); }
-  ControlChannel* control() const { return control_; }
-  // Quality mode: 0=auto (default), 1=超清, 2=高清, 3=流畅. The host applies
-  // it on the capture thread; when the control channel is open the choice is
-  // announced to the host immediately.
+  // 画质模式：0=auto 1=超清 2=高清 3=流畅。Viewer 调用会经控制通道同步。
   void setVideoQualityMode(int mode);
-  DiagStats diagStats() const {
-    return {captured_.load(),
-            encoded_.load(),
-            sent_.load(),
-            dropped_.load(),
-            received_.load(),
-            decoded_.load(),
-            decodeFailed_.load(),
-            quality_.level(),
-            encodeW_.load(),
-            encodeH_.load(),
-            static_cast<int>(encodeEmaMs_.load())};
-  }
+  void sendInput(const rd::InputEvent& ev);
+  DiagStats diagStats() const;
 
  signals:
   void connected();
@@ -99,81 +80,35 @@ class RemoteDesktopSession : public QObject {
   void statusText(const QString& text);
   void frameReady(const QImage& image);
   void inputInjected();
-
- private slots:
-  void onInputReceived(InputEvent ev);
+  // Host：本机输入桌面切到/离开安全桌面（锁屏/UAC）。capturable=false
+  // 表示本进程打不开安全桌面（未提权），画面/控制中断，解锁后自动恢复。
+  // 采集线程触发；同时经控制通道送达 Viewer（peerSecureDesktopChanged）。
+  void hostSecureDesktopChanged(bool secure, bool capturable);
+  // Viewer：收到宿主的锁屏状态变化（引擎派发线程触发）。
+  void peerSecureDesktopChanged(bool secure, bool capturable);
 
  private:
-  friend class HostLoopSink;
-  bool openCapture(int64_t screenId);
-  void hostLoop();
-  void stopThreads();
-  void resetDiag();
-  void sendVideoStatsTick();
+  friend struct SelfTestHooks;
+  bool probeScreen(int64_t screenId);
+  void wireEngineCallbacks();
+  QString runBlockingPumped(const std::function<std::string()>& fn);
+  // 采集线程的锁屏状态变化入口：本机 GUI 提示 + 经控制通道送达 Viewer。
+  // 供 CaptureSink（采集线程）与 self_test 钩子调用，引擎 Send 线程安全。
+  void HandleSecureDesktopChange(bool secure, bool capturable);
+
+  class CaptureSink;
 
   Role role_ = Role::None;
-
-  // Set to false first thing in stop(): callbacks running on libdatachannel
-  // threads check this (they hold a copy of the shared_ptr) before touching
-  // session members.
+  // 每次 startHost/startViewer 重建：stop() 翻转旧守卫后，新会话要拿新守卫，
+  // 否则重启后所有回调都会被旧标志拦掉。
   std::shared_ptr<std::atomic_bool> alive_ =
       std::make_shared<std::atomic_bool>(true);
-
-  std::unique_ptr<PeerSession> peer_;
-  ControlChannel* control_ = nullptr;
-
-  // Host side
+  std::shared_ptr<rdc::Engine> engine_;
   std::unique_ptr<ScreenCaptureThread> capture_;
-  std::unique_ptr<H264Encoder> encoder_;
-  H264StreamSender sender_;
-  std::shared_ptr<rtc::Track> sendTrack_;
+  std::unique_ptr<FrameSink> sink_;
   InputInjector injector_;
-  std::unique_ptr<std::thread> hostThread_;
-  std::atomic_bool hostRunning_{false};
-  std::atomic_bool keyframeRequested_{true};
-  int64_t screenId_ = 0;
-
-  // Encode pipeline queue: the capture thread copies each BGRA frame in and
-  // returns immediately; hostLoop() (the encoder thread) is the only
-  // consumer. Bounded so latency cannot accumulate: when the encoder falls
-  // behind, the OLDEST queued frame is dropped and the freshest one is kept.
-  struct PendingFrame {
-    std::vector<uint8_t> bgra;  // full BGRA copy (stride * height bytes)
-    int width = 0;
-    int height = 0;
-    int stride = 0;
-    int originX = 0;
-    int originY = 0;
-  };
-  std::mutex encQueueMtx_;
-  std::condition_variable encQueueCv_;
-  std::deque<PendingFrame> encQueue_;
-
-  // Diag counters (cross-thread: capture thread / rtc threads / UI).
-  std::atomic<uint32_t> captured_{0}, encoded_{0}, sent_{0}, dropped_{0};
-  std::atomic<uint32_t> received_{0}, decoded_{0}, decodeFailed_{0};
-
-  // Dynamic video quality. qualityMode_ comes from the Viewer UI (its own or
-  // via the control channel); stat* accumulate viewer per-second deltas set on
-  // the UI thread and are drained by the encoder thread's evaluate() tick.
-  // encodeW_/H_/EmaMs_ are diagnostics written by the encoder thread.
-  VideoQualityController quality_;  // encoder thread (hostLoop) only
-  std::atomic<int> qualityMode_{0};
-  std::atomic<int> statRecv_{0}, statDec_{0}, statFail_{0};
-  std::atomic<int> encodeW_{0}, encodeH_{0};
-  std::atomic<float> encodeEmaMs_{0};
-  QTimer* statsTimer_ = nullptr;  // viewer: per-second stats upload
-  uint32_t lastSentRecv_ = 0, lastSentDec_ = 0, lastSentFail_ = 0;
-  // Viewer stall detector (sendVideoStatsTick): counts ticks with no new
-  // received frames while the connection is up — the "frozen remote" symptom.
-  uint32_t stallLastRecv_ = 0;
-  int stallTicks_ = 0;
-
-  // Viewer side
-  std::mutex decoderMtx_;  // decode runs on libdatachannel threads
-  std::unique_ptr<H264Decoder> decoder_;
 };
 
 }  // namespace rd
 
-#endif
+#endif  // REMOTE_DESKTOP_SESSION_REMOTE_DESKTOP_SESSION_H_

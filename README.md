@@ -1,8 +1,14 @@
-# remote_desktop — P2P 远程桌面（screen_capture_lib + Qt + libdatachannel + OpenH264）
+# remote_desktop — P2P 远程桌面（rdc 引擎 + screen_capture_lib + Qt + libdatachannel + OpenH264）
 
 无信令服务器的点对点远程桌面工具：主控端（Viewer）看到被控端（Host）的屏幕，
 并发送鼠标/键盘控制。双方通过**手动复制粘贴 SDP**（Offer/Answer）建立连接，
 连接为 DTLS-SRTP 加密的纯 P2P 通道，不经任何第三方。
+
+所有 WebRTC 相关能力（PeerConnection / DataChannel / RTP 打包解包 / H264 编
+解码 / 画质阶梯 / 线程模型）封装在纯 C++17 引擎 **rdc**（`engine/`，零 Qt 依赖）
+中，对外只暴露一个门面类 `rdc::Engine`：API 收帧/发输入事件，回调吐帧/吐输入
+事件。Qt GUI（`src/`）只是引擎的一个宿主；`examples/` 里有完全无 Qt 的 CLI
+宿主样例。
 
 ## 架构
 
@@ -11,12 +17,14 @@ Host（被控端）                                Viewer（主控端）
 ┌─────────────────────────┐                 ┌──────────────────────────┐
 │ ScreenCaptureThread      │                 │ VideoWidget (Qt 显示)     │
 │   ↓ scl::Capturer 抓帧   │   H.264/RTP     │   ↑ QImage               │
-│ ConvertBgraToI420 (libyuv)│  ═══ SRTP ═══> │ H264Decoder (OpenH264)    │
-│ H264Encoder (OpenH264)   │   video track   │   ↑ H264RtpDepacketizer  │
-│ H264StreamSender         │                 │ PeerSession              │
-│ InputInjector (SendInput)│ <═══ DataChannel ═══│ 输入事件(JSON)         │
-│ ControlChannel           │                 │ ControlChannel           │
+│ PushVideoFrameBgra ─────▶│  ═══ SRTP ═══▶ │ OnVideoFrame 回调 ────────│
+│ InputInjector (SendInput)│                 │ H264Decoder (OpenH264)    │
+│ OnInput 回调 → 注入       │◀══ DataChannel ═│ SendInput(鼠标/键盘 JSON→二进制)
 └─────────────────────────┘                 └──────────────────────────┘
+          ▲                                          ▲
+          └──────────── rdc 引擎（纯 C++，无 Qt）────────────┘
+  PeerConnection封装 │ H264RtpPacketizer/Depacketizer │ OpenH264 │ 画质阶梯
+  DataChannel 控制协议(v2 二进制) │ 有界丢旧帧队列 │ 编码/解码/派发/统计线程
 ```
 
 - **视频**：BGRA 抓帧 → libyuv 转/缩放 I420 (1280×720) → OpenH264 编码 →
@@ -24,10 +32,43 @@ Host（被控端）                                Viewer（主控端）
   采集与编码在两个线程上流水线并行：采集线程只把 BGRA 拷入有界队列，
   专职编码线程负责 转换→编码→发送（P 帧仍严格串行，压缩率不受影响）；
   队列满时丢最旧的帧，编码永远追最新画面，延迟不会累积
-- **控制**：DataChannel 上传 JSON 事件（鼠标移动/按键/滚轮/键盘），
-  Host 端 SendInput 注入，坐标按比例映射到被控端虚拟桌面
+- **控制**：DataChannel 上传**二进制控制协议 v2**（8 字节头 + 定长载荷，
+  替代旧 JSON）承载输入事件/帧元数据/解码统计/画质选择，Host 端 SendInput
+  注入，坐标按比例映射到被控端虚拟桌面
 - **编码参数**：24fps、4Mbps、屏幕内容模式（SCREEN_CONTENT_REAL_TIME），
   连接建立即发关键帧
+
+## rdc 引擎（engine/）
+
+`rdc::Engine`（`engine/include/rdc/engine.h`）是唯一对外接口：
+
+| 方向 | API（收进） | 回调（吐出） |
+|------|-------------|--------------|
+| 视频 | `PushVideoFrameBgra/I420`（Host 推采集帧） | `OnVideoFrame`（Viewer 收解码帧，shared_ptr 零拷贝） |
+| 输入 | `SendInput`（Viewer 发鼠标键盘） | `OnInput`（Host 收远端事件去注入） |
+| 信令 | `CreateOffer / AcceptOfferCreateAnswer / AcceptAnswer` | `OnState / OnError` |
+| 画质 | `SetQualityMode` | `OnQualityChanged` |
+| 诊断 | `GetStats` | `OnRemoteStats` |
+
+回调线程契约写在头文件注释里（`OnVideoFrame` 在解码线程串行、其余在引擎派
+发线程、所有 API 任意线程可调）。移植映射：`net/peer_session`→`peer_wrapper`，
+`net/control_channel`→`control_port`+`control_protocol.h`（二进制协议，可单测：
+`rdc_protocol_test`），`net/h264_stream_sender`→`media_sender`，
+`core/openh264_codec`→`video_codec`，`session/video_quality`→`quality_ladder`；
+libyuv 源码以相同开关编入 `rdc_yuv` 静态库使引擎自包含。
+
+`src/` 内不再有任何引擎功能的重复实现：`core/openh264_codec`、`core/i420_frame`
+已删除（`rd_enc_test` 同样链接 rdc 使用引擎封装），日志统一为 `src/debug_log.h`
+→ `rdc/log.h` 别名；src 剩余的 `core/input_injector`（Win32 SendInput）、
+`session/screen_capture_thread`（采集）是宿主层职责，按设计留在 src。
+
+无 Qt 宿主样例（SDP 走 CWD 下 `rdc_offer.txt`/`rdc_answer.txt` 交换）：
+
+```powershell
+# 终端 1（被控端）          # 终端 2（主控端）
+build\examples\rdc_cli_host.exe    build\examples\rdc_cli_viewer.exe --dump first.bmp --inject
+# 可选: --screen N --duration S   可选: --duration S
+```
 
 ## 使用方法
 
