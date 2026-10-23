@@ -72,13 +72,12 @@ build\examples\rdc_cli_host.exe    build\examples\rdc_cli_viewer.exe --dump firs
 
 ## 使用方法
 
-1. 两台机器都运行 `remote_desktop.exe`
-2. **主控端**（想控制别人的一方）：切到「主控端 (Viewer)」页 → 点
-   「创建 Offer」→ 复制文本框里的 Offer SDP，用任意途径（聊天窗口/文件）发给对方
-3. **被控端**（被控制的一方）：切到「被控端 (Host)」页 → 粘贴 Offer →
+1. **主控端**（想控制别人的一方）运行 `rd_viewer.exe`：点「创建 Offer」→
+   复制文本框里的 Offer SDP，用任意途径（聊天窗口/文件）发给对方
+2. **被控端**（被控制的一方）运行 `rd_host.exe`：粘贴主控端的 Offer →
    点「生成 Answer」→ 把 Answer SDP 发回主控端（点「开始推流」确认推流）
-4. **主控端**：粘贴收到的 Answer → 点「粘贴 Answer 并连接」
-5. 连接建立（状态栏显示"已连接"）后主控端出现远端画面，鼠标键盘即接管
+3. **主控端**：粘贴收到的 Answer → 点「粘贴 Answer 并连接」
+4. 连接建立（状态栏显示"已连接"）后主控端出现远端画面，鼠标键盘即接管
 
 ICE 打洞默认走 `stun:stun.l.google.com:19302`（可改
 `src/net/peer_session.cc`）；同一局域网内通常无需 STUN 也能直连。
@@ -106,7 +105,8 @@ cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release `
   -DCMAKE_CXX_COMPILER=F:\Qt\Qt5.12.12\Tools\mingw730_64\bin\g++.exe `
   -DCMAKE_MAKE_PROGRAM=F:\Qt\Qt5.12.12\Tools\mingw730_64\bin\mingw32-make.exe
 cmake --build build
-# 产物 build\remote_desktop.exe（windeployqt 已自动部署 Qt DLL）
+# 产物 build\src\rd_host.exe（服务端）+ rd_viewer.exe（客户端）
+# （windeployqt 已自动部署 Qt DLL；rd_host_service.exe 同目录）
 ```
 
 若需重编依赖（都走同一套 MinGW 工具链）：

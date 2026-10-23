@@ -56,7 +56,7 @@ int main() {
   }
   // ---- 各类型枚举值往返 ----
   {
-    for (int t = 0; t <= 3; ++t) {
+    for (int t = 0; t <= 5; ++t) {  // 含后向兼容追加的 MouseHWheel/KeyText
       InputEvent ev;
       ev.type = static_cast<InputEvent::Type>(t);
       ev.nx = 1.0 / (t + 1);

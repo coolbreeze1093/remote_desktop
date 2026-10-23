@@ -5,6 +5,7 @@
 #include <QImage>
 #include <QObject>
 #include <QPointF>
+#include <QSet>
 #include <QWidget>
 
 #include "core/input_event.h"
@@ -47,11 +48,26 @@ class VideoWidget : public QWidget {
   void wheelEvent(QWheelEvent* event) override;
   void keyPressEvent(QKeyEvent* event) override;
   void keyReleaseEvent(QKeyEvent* event) override;
+  // 焦点丢失时远端不会收到物理抬起：释放所有已注入的键与鼠标键，
+  // 否则远端修饰键/鼠标键永久卡住（单击变拖选、点选变多选）。
+  void focusOutEvent(QFocusEvent* event) override;
+  // IME 提交文本（中文等）转发到远端；预编辑串仅本地组字，不转发。
+  void inputMethodEvent(QInputMethodEvent* event) override;
+  QVariant inputMethodQuery(Qt::InputMethodQuery query) const override;
 
  private:
   QRect videoRect() const;
   QPointF toNormalised(const QPointF& widgetPos) const;
   void emitMouseMove(const QPointF& n);
+
+  // ---- 远端注入状态跟踪（焦点丢失时按状态补齐抬起） ----
+  // 把事件携带的修饰键状态与已注入状态做差量同步：缺的补按下，多的补抬起。
+  // selfKey 为修饰键自身事件对应键（其按下/抬起由事件本身表达，不参与同步）。
+  void syncModifiers(Qt::KeyboardModifiers mods, int selfKey = 0);
+  void sendKeyEvent(uint32_t vk, bool pressed, bool extended = false);
+  void sendKeyTextUnit(uint32_t utf16Unit);  // 提交文本：注入 down+up 一对
+  void sendMouseButton(int button, bool pressed, double nx, double ny);
+  void releaseAllInjectedInput();
 
   QImage frame_;
   QString diagText_;
@@ -62,6 +78,11 @@ class VideoWidget : public QWidget {
   qint64 lastMoveMs_ = 0;
   QPointF pendingMove_{-1, -1};
   QTimer* moveTimer_ = nullptr;
+  // 远端当前“按下”的 VK 与鼠标按钮（1..5），用于焦点丢失时的补抬起。
+  QSet<quint32> remoteKeysDown_;
+  bool remoteButtonsDown_[6] = {};
+  // 最近一次鼠标位置（归一化），焦点丢失补抬起时使用。
+  double lastNx_ = 0, lastNy_ = 0;
 };
 
 }  // namespace rd

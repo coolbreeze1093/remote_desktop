@@ -173,4 +173,8 @@ add_dependencies(rdc openh264_build)
 # 无 Qt CLI demo（rdc 引擎独立使用样例）。
 add_subdirectory(examples)
 
+# 客户端/服务端两个 GUI 程序（rd_viewer / rd_host；共用 rdc 引擎与会话层）。
 add_subdirectory(src)
+
+# 被控端服务 + 会话 helper（无 Qt；--install/--service/--helper）。
+add_subdirectory(service)

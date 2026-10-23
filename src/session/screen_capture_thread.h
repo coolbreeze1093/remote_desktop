@@ -5,6 +5,10 @@
 // 本线程逐帧探测当前输入桌面，变化时重建采集器（Default → DXGI 优先；
 // 安全桌面 → 仅 GDI），并通知 sink 锁屏状态；打不开安全桌面（未提权进程）
 // 则暂停采集并如实上报，解锁后自动恢复。
+//
+// RDP 恢复：当同一用户通过 RDP 连入导致 console session 显示离线时，
+// DXGI 持续返回空帧（桌面名仍为 Default，不触发 MaybeSwitchDesktop）。
+// 达到连续空帧阈值后强制重建采集器，确保 RDP 断开后采集恢复。
 #ifndef REMOTE_DESKTOP_SESSION_SCREEN_CAPTURE_THREAD_H_
 #define REMOTE_DESKTOP_SESSION_SCREEN_CAPTURE_THREAD_H_
 
@@ -88,6 +92,7 @@ class ScreenCaptureThread {
         }
         scl::Frame f = capturer_->Capture(1000);
         if (f.data && sink_) {
+          emptyFrames_ = 0;  // reset on successful capture
           sink_->onGeometry(static_cast<int>(f.top_left_x),
                             static_cast<int>(f.top_left_y), f.width, f.height);
           scl_frame raw{f.width,   f.height, f.stride,        f.data,
@@ -96,11 +101,24 @@ class ScreenCaptureThread {
           // Buffer ownership: scl_frame_free frees what scl_capture allocated.
           scl_frame_free(&raw);
           f.data = nullptr;
-        } else if (!f.data && ++emptyFrames_ % (5000 / intervalMs_) == 1) {
-          // Persistent empty frames (transient DXGI failures): surface them
-          // roughly once per 5s, this is how a broken capture looks.
-          rdDebug("capture", "empty frame x%d (last=%s)", emptyFrames_,
-                  scl::ResultString(capturer_->last_result()));
+        } else if (!f.data) {
+          ++emptyFrames_;
+          if (emptyFrames_ >= kEmptyFramesRebuild) {
+            // Prolonged empty frames without desktop name change
+            // (e.g. RDP took over the same-user console session, then
+            //  was kicked out by our SendInput — DXGI capturer stuck).
+            // Force rebuild on next MaybeSwitchDesktop pass.
+            rdDebug("capture",
+                    "empty frame x%d/%d — forcing capturer rebuild (last=%s)",
+                    emptyFrames_, kEmptyFramesRebuild,
+                    scl::ResultString(capturer_->last_result()));
+            capturerDesktopName_.clear();
+          } else if (emptyFrames_ % (5000 / intervalMs_) == 1) {
+            // Persistent empty frames (transient DXGI failures): surface them
+            // roughly once per 5s, this is how a broken capture looks.
+            rdDebug("capture", "empty frame x%d (last=%s)", emptyFrames_,
+                    scl::ResultString(capturer_->last_result()));
+          }
         }
       } catch (const std::exception& e) {
         // A transient capturer failure must not kill the thread.
@@ -118,8 +136,30 @@ class ScreenCaptureThread {
 
   // 输入桌面变化时重建采集器（失败/未变化时为 no-op，最多每秒重试一次）。
   void MaybeSwitchDesktop() {
-    const std::wstring desktop = rd::CurrentInputDesktopName();
-    if (desktop.empty() || desktop == capturerDesktopName_) {
+    bool denied = false;
+    const std::wstring desktop = rd::CurrentInputDesktopName(&denied);
+    if (denied) {
+      // 打不开当前输入桌面：典型是锁屏/UAC 的安全桌面而本进程未提权。
+      // 采集与注入均无权限（旧采集器在锁屏下也只会出空帧），如实上报，
+      // 让两端 UI 显示明确原因；解锁后探测恢复，走下方分支补发解除。
+      static std::atomic<int> denyDbg{0};
+      if (denyDbg.fetch_add(1) < 5) {
+        // elevated 标记是关键排查位：=1 仍被拒说明本系统连提权进程也进
+        // 不了安全桌面（需转 SYSTEM 服务方案）；=0 说明实例没提权。
+        rdDebug("capture",
+                "input desktop DENIED (elevated=%d) -> report locked/unprivileged",
+                (int)rd::IsProcessElevated());
+      }
+      NotifySecureDesktop(true, false);
+      return;
+    }
+    if (desktop.empty()) {
+      return;
+    }
+    if (desktop == capturerDesktopName_) {
+      // 桌面未变；若此前上报过"未提权锁屏不可控"（denied 分支），此刻
+      // 已解锁，补发一条解除。稳态下去重后是无操作。
+      NotifySecureDesktop(false, true);
       return;
     }
     const auto now = std::chrono::steady_clock::now();
@@ -128,6 +168,15 @@ class ScreenCaptureThread {
     }
     lastDesktopAttempt_ = now;
     SwitchCapturerToDesktop(desktop);
+  }
+
+  // 锁屏状态上报（按状态去重，避免 UI/网络每帧被刷）。
+  void NotifySecureDesktop(bool secure, bool capturable) {
+    if (sink_ && (secure != reportedSecure_ || capturable != reportedCapturable_)) {
+      reportedSecure_ = secure;
+      reportedCapturable_ = capturable;
+      sink_->onSecureDesktopChanged(secure, capturable);
+    }
   }
 
   void SwitchCapturerToDesktop(const std::wstring& desktop) {
@@ -170,11 +219,7 @@ class ScreenCaptureThread {
     }
 
     emptyFrames_ = 0;
-    if (sink_ && (secure != reportedSecure_ || capturable != reportedCapturable_)) {
-      reportedSecure_ = secure;
-      reportedCapturable_ = capturable;
-      sink_->onSecureDesktopChanged(secure, capturable);
-    }
+    NotifySecureDesktop(secure, capturable);
   }
 
   static std::string ToAscii(const std::wstring& w) {
@@ -185,6 +230,9 @@ class ScreenCaptureThread {
   FrameSink* sink_ = nullptr;
   int intervalMs_ = 50;
   int emptyFrames_ = 0;
+  // After this many consecutive empty frames, force capturer rebuild
+  // even if the desktop name hasn't changed (RDP session-switch recovery).
+  static constexpr int kEmptyFramesRebuild = 30;
   int64_t screenId_ = 0;
   // 当前采集器对应的输入桌面；空串表示"上次重建未成功"，触发重试。
   std::wstring capturerDesktopName_ = L"Default";

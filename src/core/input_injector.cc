@@ -85,7 +85,12 @@ bool InputInjector::inject(const InputEvent& ev) const {
       SendInput(1, &move, sizeof(move));
 
       input.type = INPUT_MOUSE;
-      if (ev.pressed) {
+      if (ev.button >= 4 && ev.button <= 5) {
+        // 侧键（后退/前进）：XBUTTONDOWN/XUP 携带 XBUTTON1/2。
+        input.mi.dwFlags = ev.pressed ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP;
+        input.mi.mouseData =
+            (ev.button == 4) ? XBUTTON1 : XBUTTON2;
+      } else if (ev.pressed) {
         input.mi.dwFlags =
             (ev.button >= 1 && ev.button <= 3) ? kButtonFlags[ev.button] : 0;
       } else {
@@ -100,10 +105,28 @@ bool InputInjector::inject(const InputEvent& ev) const {
       input.mi.mouseData = static_cast<DWORD>(ev.wheelDelta);
       break;
     }
+    case InputEvent::Type::MouseHWheel: {
+      input.type = INPUT_MOUSE;
+      input.mi.dwFlags = MOUSEEVENTF_HWHEEL;
+      input.mi.mouseData = static_cast<DWORD>(ev.wheelDelta);
+      break;
+    }
     case InputEvent::Type::Key: {
       input.type = INPUT_KEYBOARD;
       input.ki.wVk = static_cast<WORD>(ev.keyCode);
       input.ki.dwFlags = ev.extended ? KEYEVENTF_EXTENDEDKEY : 0;
+      if (!ev.pressed) {
+        input.ki.dwFlags |= KEYEVENTF_KEYUP;
+      }
+      break;
+    }
+    case InputEvent::Type::KeyText: {
+      // IME 提交文本：VK_PACKET 路径，wScan 直接携带 UTF-16 码元，
+      // 目标应用收到 WM_CHAR；代理对按高低半字各发一次即可重组。
+      input.type = INPUT_KEYBOARD;
+      input.ki.wVk = 0;
+      input.ki.wScan = static_cast<WORD>(ev.keyCode);
+      input.ki.dwFlags = KEYEVENTF_UNICODE;
       if (!ev.pressed) {
         input.ki.dwFlags |= KEYEVENTF_KEYUP;
       }

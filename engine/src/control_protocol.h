@@ -196,7 +196,8 @@ inline bool Decode(const uint8_t* data, size_t size, Message& out) {
       }
       size_t p = 0;
       const uint8_t t = Get8(payload, p);
-      if (t > 3) {
+      // 0..3 为 v2 初版类型；4/5 为后向兼容追加（老 Host 对未知 type 丢弃并计数）。
+      if (t > 5) {
         return false;
       }
       out.type = Type::Input;

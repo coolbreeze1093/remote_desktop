@@ -45,13 +45,20 @@ struct VideoFrame {
 
 // 输入事件（归一化坐标 [0..1]，相对远端画面）。
 struct InputEvent {
-  enum class Type : uint8_t { MouseMove = 0, MouseButton, MouseWheel, Key };
+  enum class Type : uint8_t {
+    MouseMove = 0,
+    MouseButton,
+    MouseWheel,    // 垂直滚轮，wheelDelta 每格 ±120
+    Key,           // keyCode = Windows VK；extended = KEYEVENTF_EXTENDEDKEY
+    MouseHWheel = 4,  // 水平滚轮（触摸板横向滚动/倾斜滚轮），wheelDelta 同口径
+    KeyText = 5,      // IME 提交文本：keyCode = UTF-16 码元，一次注入一个字符
+  };
   Type type = Type::MouseMove;
   double nx = 0, ny = 0;
-  int button = 0;         // 1=左 2=右 3=中
+  int button = 0;         // 1=左 2=右 3=中 4=XBUTTON1（后退） 5=XBUTTON2（前进）
   bool pressed = false;
-  int wheelDelta = 0;     // 每格 ±120
-  uint32_t keyCode = 0;   // Windows VK 码
+  int wheelDelta = 0;     // 每格 ±120；MouseHWheel 时为横向增量
+  uint32_t keyCode = 0;   // Windows VK；KeyText 时为 UTF-16 码元
   bool extended = false;
   uint64_t timestampUs = 0;  // 引擎收包时刻（Host 端诊断用）
 };

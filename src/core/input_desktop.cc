@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <atomic>
+
 #include "debug_log.h"
 
 namespace rd {
@@ -50,9 +52,15 @@ std::wstring DesktopName(HDESK h) {
 
 }  // namespace
 
-std::wstring CurrentInputDesktopName() {
+std::wstring CurrentInputDesktopName(bool* deniedOut) {
+  if (deniedOut) {
+    *deniedOut = false;
+  }
   HDESK h = OpenInputDesktop(0, FALSE, kDesktopAccess);
   if (!h) {
+    if (deniedOut && GetLastError() == ERROR_ACCESS_DENIED) {
+      *deniedOut = true;
+    }
     return {};
   }
   const std::wstring name = DesktopName(h);
@@ -69,8 +77,14 @@ AttachResult AttachThisThreadToInputDesktop(std::wstring* nameOut) {
 
   HDESK input = OpenInputDesktop(0, FALSE, kDesktopAccess);
   if (!input) {
-    return GetLastError() == ERROR_ACCESS_DENIED ? AttachResult::kOpenDenied
-                                                 : AttachResult::kOpenFailed;
+    const DWORD err = GetLastError();
+    // 打不开多因权限（未提权遇安全桌面 err=5）；留痕便于 rd_debug.log 定位。
+    static std::atomic<int> openDbg{0};
+    if (openDbg.fetch_add(1) < 10) {
+      rdDebug("desktop", "OpenInputDesktop failed err=%lu", (unsigned long)err);
+    }
+    return err == ERROR_ACCESS_DENIED ? AttachResult::kOpenDenied
+                                      : AttachResult::kOpenFailed;
   }
   const std::wstring name = DesktopName(input);
   if (name.empty()) {
@@ -97,7 +111,25 @@ AttachResult AttachThisThreadToInputDesktop(std::wstring* nameOut) {
   return AttachResult::kOnInputDesktop;
 }
 
+bool IsProcessElevated() {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+    return false;
+  }
+  DWORD elevated = 0;
+  DWORD returned = 0;
+  const BOOL ok = GetTokenInformation(token, TokenElevation, &elevated,
+                                      sizeof(elevated), &returned);
+  CloseHandle(token);
+  return ok && elevated;
+}
+
 bool CanOpenSecureDesktop() {
+  // 以令牌提权状态为准（TokenElevation，SYSTEM 亦为真）；名字探测仅在
+  // 非提权进程意外可开时作为附加肯定信号，绝不因它单独失败而误报。
+  if (IsProcessElevated()) {
+    return true;
+  }
   HDESK h = OpenDesktopW(L"Winlogon", 0, FALSE, kDesktopAccess);
   if (!h) {
     return false;

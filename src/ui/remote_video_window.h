@@ -30,6 +30,9 @@ class RemoteVideoWindow : public QWidget {
   // Pops the window up fullscreen (used when the session connects).
   void showFullscreen();
 
+  // 全屏/窗口切换（工具栏按钮与预览双击共用）。
+  void toggleFullscreen();
+
  signals:
   // Forwarded from the inner VideoWidget.
   void inputEvent(const rd::InputEvent& ev);
@@ -44,7 +47,6 @@ class RemoteVideoWindow : public QWidget {
 
  private:
   void buildToolbar();
-  void toggleFullscreen();
   void showToolbar();
   void positionToolbar();
 

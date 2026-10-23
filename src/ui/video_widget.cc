@@ -1,10 +1,13 @@
 #include "ui/video_widget.h"
 
 #include <QDateTime>
+#include <QFocusEvent>
+#include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QTimer>
+#include <QVariant>
 #include <QWheelEvent>
 
 #include <windows.h>
@@ -27,34 +30,95 @@ int mapQtButton(Qt::MouseButton b) {
     case Qt::LeftButton: return 1;
     case Qt::RightButton: return 2;
     case Qt::MiddleButton: return 3;
+    case Qt::XButton1: return 4;  // 鼠标后退键
+    case Qt::XButton2: return 5;  // 鼠标前进键
     default: return 0;
   }
 }
 
-uint32_t qtKeyToVk(int key) {
+// Qt 键 → Windows VK。要点：
+//  - 标点按美式布局映射 VK_OEM_*（远端布局不同时字符跟随远端布局，与物理
+//    键盘转发行为一致）。
+//  - 小键盘（KeypadModifier）：NumLock 开时数字/运算符映射 VK_NUMPAD*；
+//    NumLock 关时导航键映射为不带扩展位的小键盘 VK_*。
+//  - 导航键（方向/Home/End/PgUp/PgDn/Insert/Delete）在主键区是扩展键，必须
+//    带 KEYEVENTF_EXTENDEDKEY，否则远端当成小键盘键（NumLock 开时
+//    Delete→'.'、Left→'4'，终端/编辑器里表现为按键失灵）。
+uint32_t qtKeyToVk(int key, Qt::KeyboardModifiers mods, bool* extended) {
+  const bool keypad = (mods & Qt::KeypadModifier) != 0;
+  if (extended) {
+    *extended = false;
+  }
   // Letters and digits map directly (Windows VK codes mirror ASCII).
   if (key >= Qt::Key_A && key <= Qt::Key_Z) return uint32_t('A' + (key - Qt::Key_A));
-  if (key >= Qt::Key_0 && key <= Qt::Key_9) return uint32_t('0' + (key - Qt::Key_0));
+  if (key >= Qt::Key_0 && key <= Qt::Key_9) {
+    if (keypad) {
+      return uint32_t(VK_NUMPAD0 + (key - Qt::Key_0));
+    }
+    return uint32_t('0' + (key - Qt::Key_0));
+  }
+  if (keypad) {
+    // NumLock 开：小键盘运算符（小数点/逗号在小键盘上是 Del 位）。
+    switch (key) {
+      case Qt::Key_Slash: return VK_DIVIDE;
+      case Qt::Key_Asterisk: return VK_MULTIPLY;
+      case Qt::Key_Minus: return VK_SUBTRACT;
+      case Qt::Key_Plus: return VK_ADD;
+      case Qt::Key_Period:
+      case Qt::Key_Comma: return VK_DECIMAL;
+      default: break;
+    }
+  }
   switch (key) {
-    case Qt::Key_Return: case Qt::Key_Enter: return VK_RETURN;
+    case Qt::Key_Return: return VK_RETURN;  // 主键区回车不是扩展键
+    case Qt::Key_Enter:
+      // 小键盘回车是扩展键。
+      if (extended) *extended = true;
+      return VK_RETURN;
     case Qt::Key_Escape: return VK_ESCAPE;
     case Qt::Key_Tab: return VK_TAB;
     case Qt::Key_Backspace: return VK_BACK;
-    case Qt::Key_Delete: return VK_DELETE;
-    case Qt::Key_Insert: return VK_INSERT;
-    case Qt::Key_Home: return VK_HOME;
-    case Qt::Key_End: return VK_END;
-    case Qt::Key_PageUp: return VK_PRIOR;
-    case Qt::Key_PageDown: return VK_NEXT;
-    case Qt::Key_Left: return VK_LEFT;
-    case Qt::Key_Right: return VK_RIGHT;
-    case Qt::Key_Up: return VK_UP;
-    case Qt::Key_Down: return VK_DOWN;
+    // 导航键：主键区变体为扩展键；小键盘变体（NumLock 关）不带扩展位。
+    case Qt::Key_Insert: case Qt::Key_Delete: case Qt::Key_Home:
+    case Qt::Key_End: case Qt::Key_PageUp: case Qt::Key_PageDown:
+    case Qt::Key_Left: case Qt::Key_Right: case Qt::Key_Up:
+    case Qt::Key_Down: {
+      if (extended) *extended = !keypad;
+      switch (key) {
+        case Qt::Key_Insert: return VK_INSERT;
+        case Qt::Key_Delete: return VK_DELETE;
+        case Qt::Key_Home: return VK_HOME;
+        case Qt::Key_End: return VK_END;
+        case Qt::Key_PageUp: return VK_PRIOR;
+        case Qt::Key_PageDown: return VK_NEXT;
+        case Qt::Key_Left: return VK_LEFT;
+        case Qt::Key_Right: return VK_RIGHT;
+        case Qt::Key_Up: return VK_UP;
+        default: return VK_DOWN;
+      }
+    }
+    // 标点与符号（US 布局 VK_OEM_*；Shift 组合出的字符由修饰键同步完成）。
+    case Qt::Key_Semicolon: return VK_OEM_1;
+    case Qt::Key_Equal: return VK_OEM_PLUS;
+    case Qt::Key_Comma: return VK_OEM_COMMA;
+    case Qt::Key_Minus: return VK_OEM_MINUS;
+    case Qt::Key_Period: return VK_OEM_PERIOD;
+    case Qt::Key_Slash: return VK_OEM_2;
+    case Qt::Key_QuoteLeft: return VK_OEM_3;
+    case Qt::Key_BracketLeft: return VK_OEM_4;
+    case Qt::Key_Backslash: return VK_OEM_5;
+    case Qt::Key_BracketRight: return VK_OEM_6;
+    case Qt::Key_Apostrophe: return VK_OEM_7;
     case Qt::Key_Space: return VK_SPACE;
     case Qt::Key_Control: return VK_CONTROL;
     case Qt::Key_Shift: return VK_SHIFT;
     case Qt::Key_Alt: return VK_MENU;
     case Qt::Key_Meta: return VK_LWIN;
+    case Qt::Key_CapsLock: return VK_CAPITAL;
+    case Qt::Key_NumLock: return VK_NUMLOCK;
+    case Qt::Key_ScrollLock: return VK_SCROLL;
+    case Qt::Key_Print: return VK_SNAPSHOT;
+    case Qt::Key_Pause: return VK_PAUSE;
     case Qt::Key_F1: return VK_F1;
     case Qt::Key_F2: return VK_F2;
     case Qt::Key_F3: return VK_F3;
@@ -76,6 +140,8 @@ uint32_t qtKeyToVk(int key) {
 VideoWidget::VideoWidget(QWidget* parent) : QWidget(parent) {
   setMouseTracking(true);
   setFocusPolicy(Qt::StrongFocus);
+  // 让 IME 在本控件上激活（中文等输入法提交时才有 inputMethodEvent）。
+  setAttribute(Qt::WA_InputMethodEnabled, true);
   setMinimumSize(320, 180);
   moveTimer_ = new QTimer(this);
   moveTimer_->setSingleShot(true);
@@ -148,6 +214,8 @@ void VideoWidget::emitMouseMove(const QPointF& n) {
 
 void VideoWidget::mouseMoveEvent(QMouseEvent* e) {
   const QPointF n = toNormalised(e->localPos());
+  lastNx_ = n.x();
+  lastNy_ = n.y();
   const qint64 now = QDateTime::currentMSecsSinceEpoch();
   if (now - lastMoveMs_ >= kMoveIntervalMs) {
     lastMoveMs_ = now;
@@ -161,63 +229,205 @@ void VideoWidget::mouseMoveEvent(QMouseEvent* e) {
 
 void VideoWidget::mousePressEvent(QMouseEvent* e) {
   const QPointF n = toNormalised(e->localPos());
-  InputEvent ev;
-  ev.type = InputEvent::Type::MouseButton;
-  ev.nx = n.x();
-  ev.ny = n.y();
-  ev.button = mapQtButton(e->button());
-  ev.pressed = true;
-  emit inputEvent(ev);
+  lastNx_ = n.x();
+  lastNy_ = n.y();
+  // Ctrl+click 多选 / Shift+click 范围选择等组合先差量同步修饰键。
+  syncModifiers(e->modifiers());
+  sendMouseButton(mapQtButton(e->button()), true, n.x(), n.y());
 }
 
 void VideoWidget::mouseReleaseEvent(QMouseEvent* e) {
   const QPointF n = toNormalised(e->localPos());
-  InputEvent ev;
-  ev.type = InputEvent::Type::MouseButton;
-  ev.nx = n.x();
-  ev.ny = n.y();
-  ev.button = mapQtButton(e->button());
-  ev.pressed = false;
-  emit inputEvent(ev);
+  lastNx_ = n.x();
+  lastNy_ = n.y();
+  syncModifiers(e->modifiers());
+  sendMouseButton(mapQtButton(e->button()), false, n.x(), n.y());
 }
 
-void VideoWidget::mouseDoubleClickEvent(QMouseEvent*) {
+void VideoWidget::mouseDoubleClickEvent(QMouseEvent* e) {
+  // Qt 双击序列：Press, Release, DblClick（代替第二次 Press）, Release。
+  // 若不在这里补发，远端只收到 down/up/up，Windows 合不成 WM_LBUTTONDBLCLK，
+  // 被控端表现为"双击无反应"。补发后远端收到完整 down/up/down/up。
+  const QPointF n = toNormalised(e->localPos());
+  lastNx_ = n.x();
+  lastNy_ = n.y();
+  syncModifiers(e->modifiers());
+  sendMouseButton(mapQtButton(e->button()), true, n.x(), n.y());
+
+  // 本地行为不变：双击预览画面弹出/收起全屏远端窗口。
   emit doubleClicked();
 }
 
 void VideoWidget::wheelEvent(QWheelEvent* e) {
-  InputEvent ev;
-  ev.type = InputEvent::Type::MouseWheel;
-  ev.wheelDelta = e->angleDelta().y();
-  emit inputEvent(ev);
+  // Ctrl+滚轮缩放等组合先差量同步修饰键。
+  syncModifiers(e->modifiers());
+  const QPoint delta = e->angleDelta();
+  if (delta.y() != 0) {
+    InputEvent ev;
+    ev.type = InputEvent::Type::MouseWheel;
+    ev.wheelDelta = delta.y();
+    emit inputEvent(ev);
+  }
+  // 触摸板横向滚动 / 倾斜滚轮：远端注入 MOUSEEVENTF_HWHEEL。
+  if (delta.x() != 0) {
+    InputEvent ev;
+    ev.type = InputEvent::Type::MouseHWheel;
+    ev.wheelDelta = delta.x();
+    emit inputEvent(ev);
+  }
+  e->accept();
 }
 
 void VideoWidget::keyPressEvent(QKeyEvent* e) {
-  const uint32_t vk = qtKeyToVk(e->key());
+  // 组合键差量同步修饰键：Ctrl+C 的事件是"Key_C + ControlModifier"，只发 C
+  // 的话远端收到裸 'c'，快捷键全部失效。修饰键自身的事件由事件本身表达
+  // （syncModifiers 的 selfKey 跳过）。
+  syncModifiers(e->modifiers(), e->key());
+  bool extended = false;
+  const uint32_t vk = qtKeyToVk(e->key(), e->modifiers(), &extended);
+  if (vk != 0 && (e->key() == Qt::Key_Control || e->key() == Qt::Key_Alt)) {
+    // 右 Ctrl / 右 Alt 是扩展键；Qt 的 key 不区分左右，查原始扫描码扩展位
+    // （Qt 文档：Windows 上左 Ctrl=29、右 Ctrl=285，扩展位记在 0x100）。
+    extended = (e->nativeScanCode() & 0x100) != 0;
+  }
   if (vk == 0) {
     QWidget::keyPressEvent(e);
     return;
   }
-  InputEvent ev;
-  ev.type = InputEvent::Type::Key;
-  ev.keyCode = vk;
-  ev.pressed = true;
-  ev.extended = (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU) &&
-                (e->modifiers() & (Qt::KeypadModifier));
-  emit inputEvent(ev);
+  // 按住不放的自动重复会连续到达这里：连续注入 down，远端即得到连续字符，
+  // 与本地打字体验一致。
+  sendKeyEvent(vk, true, extended);
 }
 
 void VideoWidget::keyReleaseEvent(QKeyEvent* e) {
-  const uint32_t vk = qtKeyToVk(e->key());
+  syncModifiers(e->modifiers(), e->key());
+  bool extended = false;
+  const uint32_t vk = qtKeyToVk(e->key(), e->modifiers(), &extended);
   if (vk == 0) {
     QWidget::keyReleaseEvent(e);
     return;
   }
+  sendKeyEvent(vk, false, extended);
+}
+
+void VideoWidget::focusOutEvent(QFocusEvent* e) {
+  // 焦点丢失（点别的窗口/Alt+Tab）后收不到物理抬起：按跟踪状态补齐抬起，
+  // 否则远端修饰键/鼠标键永久卡住（单击变拖选、点选变多选）。
+  releaseAllInjectedInput();
+  QWidget::focusOutEvent(e);
+}
+
+void VideoWidget::inputMethodEvent(QInputMethodEvent* e) {
+  // 中文等 IME 输入只在提交时转发；预编辑串是本地组字状态，远端没有对应
+  // UI，不转发。每个 UTF-16 码元注入一对 down/up（VK_PACKET 路径），代理对
+  // 自然拆成高低半字，远端重新组合成完整字符。
+  const QString commit = e->commitString();
+  for (QChar ch : commit) {
+    sendKeyTextUnit(ch.unicode());
+  }
+  e->accept();
+}
+
+QVariant VideoWidget::inputMethodQuery(Qt::InputMethodQuery query) const {
+  if (query == Qt::ImEnabled) {
+    return true;
+  }
+  return QWidget::inputMethodQuery(query);
+}
+
+void VideoWidget::syncModifiers(Qt::KeyboardModifiers mods, int selfKey) {
+  struct ModDef {
+    Qt::KeyboardModifier qm;
+    int qtKey;
+    uint32_t vk;
+  };
+  static const ModDef kMods[] = {
+      {Qt::ShiftModifier, Qt::Key_Shift, VK_SHIFT},
+      {Qt::ControlModifier, Qt::Key_Control, VK_CONTROL},
+      {Qt::AltModifier, Qt::Key_Alt, VK_MENU},
+  };
+  for (const ModDef& m : kMods) {
+    if (m.qtKey == selfKey) {
+      continue;  // 修饰键自身的按下/抬起由它自己的事件表达
+    }
+    const bool want = (mods & m.qm) != 0;
+    const bool have = remoteKeysDown_.contains(m.vk);
+    if (want && !have) {
+      sendKeyEvent(m.vk, true);
+    } else if (!want && have) {
+      sendKeyEvent(m.vk, false);
+    }
+  }
+}
+
+void VideoWidget::sendKeyEvent(uint32_t vk, bool pressed, bool extended) {
   InputEvent ev;
   ev.type = InputEvent::Type::Key;
   ev.keyCode = vk;
-  ev.pressed = false;
+  ev.pressed = pressed;
+  ev.extended = extended;
+  if (pressed) {
+    remoteKeysDown_.insert(vk);
+  } else {
+    remoteKeysDown_.remove(vk);
+  }
   emit inputEvent(ev);
+}
+
+void VideoWidget::sendKeyTextUnit(uint32_t utf16Unit) {
+  for (int pass = 0; pass < 2; ++pass) {
+    InputEvent ev;
+    ev.type = InputEvent::Type::KeyText;
+    ev.keyCode = utf16Unit;
+    ev.pressed = (pass == 0);
+    emit inputEvent(ev);
+  }
+}
+
+void VideoWidget::sendMouseButton(int button, bool pressed, double nx,
+                                  double ny) {
+  if (button < 1 || button > 5) {
+    return;
+  }
+  InputEvent ev;
+  ev.type = InputEvent::Type::MouseButton;
+  ev.nx = nx;
+  ev.ny = ny;
+  ev.button = button;
+  ev.pressed = pressed;
+  remoteButtonsDown_[button] = pressed;
+  emit inputEvent(ev);
+}
+
+void VideoWidget::releaseAllInjectedInput() {
+  // 顺序：先普通键后修饰键（修饰键最后松开，与物理释放习惯一致）。
+  // 遍历用的是副本：sendKeyEvent 会修改 remoteKeysDown_，直接迭代会失效。
+  static const uint32_t kModVks[] = {VK_SHIFT, VK_CONTROL, VK_MENU};
+  const auto isMod = [](uint32_t vk) {
+    for (const uint32_t m : kModVks) {
+      if (vk == m) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const QSet<quint32> down = remoteKeysDown_;
+  remoteKeysDown_.clear();
+  for (const quint32 vk : down) {
+    if (!isMod(vk)) {
+      sendKeyEvent(vk, false);
+    }
+  }
+  for (const uint32_t m : kModVks) {
+    if (down.contains(m)) {
+      sendKeyEvent(m, false);
+    }
+  }
+  for (int b = 1; b <= 5; ++b) {
+    if (remoteButtonsDown_[b]) {
+      sendMouseButton(b, false, lastNx_, lastNy_);
+    }
+  }
 }
 
 }  // namespace rd

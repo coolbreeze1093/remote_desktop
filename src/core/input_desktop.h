@@ -16,8 +16,10 @@
 
 namespace rd {
 
-// 当前接收输入的桌面名（"Default"/"Winlogon"…）。探测失败返回空串。
-std::wstring CurrentInputDesktopName();
+// 当前接收输入的桌面名（"Default"/"Winlogon"…）。探测失败返回空串；
+// deniedOut 非空时写入"是否因权限不足打不开输入桌面"（未提权进程遇安全
+// 桌面的固定特征），调用方借此区分"锁屏且无权限"与"探测失败"。
+std::wstring CurrentInputDesktopName(bool* deniedOut = nullptr);
 
 // 是否为安全桌面（锁屏/UAC）。名字为空按"未知"处理，返回 false。
 bool IsSecureDesktopName(const std::wstring& name);
@@ -35,8 +37,14 @@ enum class AttachResult {
 // 附着到输入桌面时才会落到该桌面的输入流。
 AttachResult AttachThisThreadToInputDesktop(std::wstring* nameOut = nullptr);
 
-// 进程能否打开 Winlogon 安全桌面（锁屏采集与注入的前提，即提权与否）。
-// 未提权进程返回 false。宿主启动时预检一次，用于提前提示用户。
+// 进程令牌是否为提权后的完整令牌（UAC 批准下的管理员进程；SYSTEM 服务
+// 亦为真）。这是"锁屏/UAC 采集与注入能否工作"的决定条件：运行时走
+// OpenInputDesktop 跟随输入桌面，能否打开由令牌权限决定。
+bool IsProcessElevated();
+
+// 锁屏采集与注入是否可用（即进程是否提权/SYSTEM）。宿主启动时预检一次，
+// 用于提前提示用户。注意不能只看"按名字打开 Winlogon"——那只是间接信号，
+// 个别系统上提权进程也打不开名字引用，会误报"未提权"。
 bool CanOpenSecureDesktop();
 
 }  // namespace rd
