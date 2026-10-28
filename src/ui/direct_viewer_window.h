@@ -19,7 +19,6 @@ namespace rd {
 
 class DirectSignalingClient;
 class RemoteVideoWindow;
-class VideoWidget;
 
 class DirectViewerWindow : public SessionWindow {
   Q_OBJECT
@@ -53,6 +52,7 @@ class DirectViewerWindow : public SessionWindow {
   QLineEdit* hostEdit_ = nullptr;
   QLineEdit* portEdit_ = nullptr;
   QPushButton* connectBtn_ = nullptr;
+  QPushButton* showVideoBtn_ = nullptr;  // 连接中重新弹出远端画面窗口
   QComboBox* qualityBox_ = nullptr;
   QComboBox* screenBox_ = nullptr;      // 被控端屏幕（连接时自动拉列表）
   QVector<qint64> screenIds_;           // 与 screenBox_ 条目一一对应
@@ -60,7 +60,6 @@ class DirectViewerWindow : public SessionWindow {
   bool offerSent_ = false;              // 本次信令连接是否已发出 Offer
   QTimer* screensTimer_ = nullptr;      // 列表超时兑底（超时按默认屏发 Offer）
   QLabel* lockHint_ = nullptr;
-  VideoWidget* viewerPreview_ = nullptr;
   RemoteVideoWindow* videoWindow_ = nullptr;
   DirectSignalingClient* signaling_ = nullptr;
   QString pendingOffer_;

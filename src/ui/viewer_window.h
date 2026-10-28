@@ -14,7 +14,6 @@ class QPushButton;
 namespace rd {
 
 class RemoteVideoWindow;
-class VideoWidget;
 
 class ViewerWindow : public SessionWindow {
   Q_OBJECT
@@ -37,12 +36,12 @@ class ViewerWindow : public SessionWindow {
   RemoteVideoWindow* videoWindow_ = nullptr;
 
   // Viewer widgets
-  VideoWidget* viewerPreview_ = nullptr;  // embedded live preview (no popup)
   QComboBox* qualityBox_ = nullptr;       // 自动/超清/高清/流畅
   QPlainTextEdit* viewerOffer_ = nullptr;
   QPlainTextEdit* viewerAnswer_ = nullptr;
   QPushButton* viewerOfferBtn_ = nullptr;
   QPushButton* viewerConnectBtn_ = nullptr;
+  QPushButton* viewerShowVideoBtn_ = nullptr;  // 连接中重新弹出远端画面窗口
   QLabel* viewerLockHint_ = nullptr;    // 宿主侧锁屏状态提示（操作者可见）
 };
 

@@ -16,7 +16,6 @@
 #include "core/input_event.h"
 #include "session/direct_signaling.h"
 #include "ui/remote_video_window.h"
-#include "ui/video_widget.h"
 
 namespace rd {
 
@@ -164,27 +163,17 @@ QWidget* DirectViewerWindow::makeViewerPanel() {
   stateLabel_->setWordWrap(true);
   lay->addWidget(stateLabel_);
 
+  // 连接中重新弹出远端画面窗口的入口（弹窗被关掉时从这里找回）。
+  showVideoBtn_ = new QPushButton(tr("显示远端画面"), panel);
+  showVideoBtn_->hide();
+  connect(showVideoBtn_, &QPushButton::clicked, videoWindow_,
+          &RemoteVideoWindow::showFullscreen);
+  lay->addWidget(showVideoBtn_);
+
   lockHint_ = new QLabel(panel);
   lockHint_->setWordWrap(true);
   lockHint_->hide();
   lay->addWidget(lockHint_);
-
-  // 内嵌实时预览（与 rd_viewer 相同）：同机测试不依赖全屏弹窗。
-  viewerPreview_ = new VideoWidget;
-  viewerPreview_->setToolTip(tr("双击打开/关闭全屏远端画面窗口"));
-  connect(viewerPreview_, &VideoWidget::inputEvent, this,
-          &DirectViewerWindow::sendInputEvent);
-  // 补上与提示一致的交互：双击预览切换全屏远端窗口。
-  connect(viewerPreview_, &VideoWidget::doubleClicked, videoWindow_,
-          &RemoteVideoWindow::toggleFullscreen);
-  connect(session_, &RemoteDesktopSession::frameReady, viewerPreview_,
-          &VideoWidget::setFrame, Qt::QueuedConnection);
-  connect(session_, &RemoteDesktopSession::cursorMoved, viewerPreview_,
-          &VideoWidget::setRemoteCursorPos, Qt::QueuedConnection);
-  connect(session_, &RemoteDesktopSession::cursorShapeChanged, viewerPreview_,
-          &VideoWidget::setRemoteCursorShape, Qt::QueuedConnection);
-  lay->addWidget(viewerPreview_, 1);
-  viewerPreview_->hide();
 
   // 被控端锁屏状态提示（引擎派发线程触发）。
   connect(session_, &RemoteDesktopSession::peerSecureDesktopChanged, this,
@@ -353,7 +342,6 @@ void DirectViewerWindow::onAnswerReceived(const QString& answer) {
   connecting_ = false;
   connectBtn_->setText(tr("断开"));
   setStatus(tr("Answer 已收到，P2P 建立中..."));
-  viewerPreview_->show();
 }
 
 void DirectViewerWindow::onSignalingFailed(const QString& reason) {
@@ -377,6 +365,7 @@ void DirectViewerWindow::resetForRetry(const QString& statusText) {
   offerSent_ = false;
   connectBtn_->setText(tr("连接"));
   connectBtn_->setEnabled(true);
+  showVideoBtn_->hide();
   setStatus(statusText);
 }
 
@@ -384,7 +373,10 @@ void DirectViewerWindow::onSessionConnected() {
   rdDebug("direct-viewer", "session connected");
   everConnected_ = true;
   autoAttempts_ = 0;
-  setStatus(tr("已连接 — 双击预览画面可全屏"));
+  setStatus(tr("已连接 — 远端画面已弹出"));
+  // 连接建立即弹出独立远端画面窗口（工具栏可退出全屏）。
+  videoWindow_->showFullscreen();
+  showVideoBtn_->show();
 }
 
 void DirectViewerWindow::onSessionDisconnected() {

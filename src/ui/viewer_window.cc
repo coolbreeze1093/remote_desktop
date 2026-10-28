@@ -10,7 +10,6 @@
 
 #include "core/input_event.h"
 #include "ui/remote_video_window.h"
-#include "ui/video_widget.h"
 
 namespace rd {
 
@@ -62,43 +61,25 @@ ViewerWindow::ViewerWindow(QWidget* parent) : SessionWindow(parent) {
       QStringLiteral(__DATE__), QStringLiteral(__TIME__)));
   resize(960, 720);
   setStatus(tr("就绪"));
-
-  // The embedded preview is built inside makeViewerTab(); feed it frames now.
-  connect(session_, &RemoteDesktopSession::frameReady, viewerPreview_,
-          &VideoWidget::setFrame, Qt::QueuedConnection);
-  connect(session_, &RemoteDesktopSession::cursorMoved, viewerPreview_,
-          &VideoWidget::setRemoteCursorPos, Qt::QueuedConnection);
-  connect(session_, &RemoteDesktopSession::cursorShapeChanged, viewerPreview_,
-          &VideoWidget::setRemoteCursorShape, Qt::QueuedConnection);
 }
 
 void ViewerWindow::onSessionConnected() {
-  setStatus(tr("已连接 — 双击预览画面可全屏"));
-  // Same-machine testing: auto-popping fullscreen would mirror the captured
-  // screen into itself; the embedded preview shows the stream instead.
+  setStatus(tr("已连接 — 远端画面已弹出"));
+  // 连接建立即弹出独立远端画面窗口（工具栏可退出全屏）。
+  videoWindow_->showFullscreen();
+  viewerShowVideoBtn_->show();
 }
 
 void ViewerWindow::onSessionDisconnected() {
   videoWindow_->close();
+  viewerShowVideoBtn_->hide();
 }
 
 void ViewerWindow::applyDiagText(const QString& text) {
   videoWindow_->setDiagText(text);
-  if (viewerPreview_) {
-    viewerPreview_->setDiagText(text);
-  }
 }
 
 QWidget* ViewerWindow::makeViewerTab() {
-  // Embedded live preview: visible on the Viewer tab itself so same-machine
-  // testing does not depend on the fullscreen popup (which would otherwise
-  // mirror the captured screen into itself). Double-click pops the fullscreen
-  // remote window back up.
-  viewerPreview_ = new VideoWidget;
-  viewerPreview_->setToolTip(tr("双击打开/关闭全屏远端画面窗口"));
-  connect(viewerPreview_, &VideoWidget::inputEvent, this,
-          &ViewerWindow::sendInputEvent);
-
   auto* panel = new QWidget();
   auto* lay = new QVBoxLayout(panel);
 
@@ -121,6 +102,13 @@ QWidget* ViewerWindow::makeViewerTab() {
   stateLabel_ =
       new QLabel(tr("1) 创建 Offer 发给被控端，2) 粘贴 Answer 并连接"), panel);
   lay->addWidget(stateLabel_);
+
+  // 连接中重新弹出远端画面窗口的入口（弹窗被关掉时从这里找回）。
+  viewerShowVideoBtn_ = new QPushButton(tr("显示远端画面"), panel);
+  viewerShowVideoBtn_->hide();
+  connect(viewerShowVideoBtn_, &QPushButton::clicked, videoWindow_,
+          &RemoteVideoWindow::showFullscreen);
+  lay->addWidget(viewerShowVideoBtn_);
 
   // 宿主侧锁屏/UAC 状态提示（锁屏期间画面冻结时的原因说明）。
   viewerLockHint_ = new QLabel(panel);
@@ -186,7 +174,6 @@ void ViewerWindow::onViewerConnect() {
     return;
   }
   setStatus(tr("正在连接..."));
-  viewerPreview_->show();
 }
 
 }  // namespace rd
