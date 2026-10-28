@@ -1,6 +1,7 @@
 #include "ui/direct_viewer_window.h"
 
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -27,6 +28,24 @@ constexpr quint16 kDefaultPort = 48010;
 // 长时间离线的情况。
 constexpr int kMaxAutoReconnects = 5;
 const int kRetryDelaysMs[] = {1500, 3000, 5000, 8000, 12000};
+// 历史连接记录条数（主界面下拉框展示，QSettings 持久化）。
+constexpr int kMaxHistory = 5;
+
+// 拆 "host[:port]"：冒号后全为数字才视作端口（兼容在 IP 框直接粘 host:port）。
+bool splitAddress(const QString& text, QString* host, quint16* port) {
+  const int colon = text.lastIndexOf(':');
+  if (colon > 0) {
+    bool ok = false;
+    const quint16 p = text.mid(colon + 1).toUShort(&ok);
+    if (ok && p > 0) {
+      *host = text.left(colon).trimmed();
+      *port = p;
+      return !host->isEmpty();
+    }
+  }
+  *host = text;
+  return !text.isEmpty();
+}
 }  // namespace
 
 DirectViewerWindow::DirectViewerWindow(QWidget* parent)
@@ -139,12 +158,29 @@ QWidget* DirectViewerWindow::makeViewerPanel() {
     startConnection(autoHost_, autoPort_);
   });
 
-  // 连接行：IP + 端口 + 连接按钮。
+  // 连接行：IP（带历史下拉）+ 端口 + 连接按钮。
   auto* connRow = new QHBoxLayout();
   connRow->addWidget(new QLabel(tr("被控端 IP:"), panel));
-  hostEdit_ = new QLineEdit(panel);
-  hostEdit_->setPlaceholderText(tr("例如 192.168.1.20"));
-  connRow->addWidget(hostEdit_, 2);
+  hostCombo_ = new QComboBox(panel);
+  hostCombo_->setEditable(true);
+  hostCombo_->setInsertPolicy(QComboBox::NoInsert);
+  if (hostCombo_->lineEdit()) {
+    hostCombo_->lineEdit()->setPlaceholderText(tr("例如 192.168.1.20"));
+  }
+  loadAddressHistory();
+  // 从下拉选一条历史：填回 IP 与端口两个字段。
+  connect(hostCombo_, qOverload<int>(&QComboBox::activated), this,
+          [this](int index) {
+            QString host;
+            quint16 port = 0;
+            if (splitAddress(hostCombo_->itemText(index).trimmed(), &host,
+                             &port) &&
+                port > 0) {
+              hostCombo_->setCurrentText(host);
+              portEdit_->setText(QString::number(port));
+            }
+          });
+  connRow->addWidget(hostCombo_, 2);
   connRow->addWidget(new QLabel(tr("端口:"), panel));
   portEdit_ = new QLineEdit(QString::number(kDefaultPort), panel);
   connRow->addWidget(portEdit_, 1);
@@ -194,7 +230,7 @@ QWidget* DirectViewerWindow::makeViewerPanel() {
 }
 
 void DirectViewerWindow::autoConnect(const QString& host, quint16 port) {
-  hostEdit_->setText(host);
+  hostCombo_->setCurrentText(host);
   portEdit_->setText(QString::number(port));
   onToggleConnect();
 }
@@ -211,15 +247,50 @@ void DirectViewerWindow::onToggleConnect() {
     resetForRetry(tr("已断开连接"));
     return;
   }
-  const QString host = hostEdit_->text().trimmed();
-  bool ok = false;
-  const quint16 port = portEdit_->text().toUShort(&ok);
-  if (host.isEmpty() || !ok || port == 0) {
+  QString host;
+  quint16 port = 0;
+  if (!splitAddress(hostCombo_->currentText().trimmed(), &host, &port)) {
     QMessageBox::information(this, tr("远程桌面"),
                              tr("请填写被控端 IP 与有效端口"));
     return;
   }
+  if (port == 0) {
+    bool ok = false;
+    port = portEdit_->text().toUShort(&ok);
+    if (!ok || port == 0) {
+      QMessageBox::information(this, tr("远程桌面"),
+                               tr("请填写被控端 IP 与有效端口"));
+      return;
+    }
+  }
   startConnection(host, port);
+}
+
+void DirectViewerWindow::loadAddressHistory() {
+  history_ = QSettings(QStringLiteral("remote_desktop"), QStringLiteral("ui"))
+                 .value(QStringLiteral("directViewer/recentAddresses"))
+                 .toStringList();
+  while (history_.size() > kMaxHistory) {
+    history_.removeLast();
+  }
+  hostCombo_->clear();
+  hostCombo_->addItems(history_);
+  hostCombo_->clearEditText();
+}
+
+void DirectViewerWindow::rememberAddress(const QString& host, quint16 port) {
+  const QString entry = QStringLiteral("%1:%2").arg(host).arg(port);
+  history_.removeAll(entry);
+  history_.prepend(entry);
+  while (history_.size() > kMaxHistory) {
+    history_.removeLast();
+  }
+  QSettings(QStringLiteral("remote_desktop"), QStringLiteral("ui"))
+      .setValue(QStringLiteral("directViewer/recentAddresses"), history_);
+  // 下拉框同步刷新（不清编辑框，保留当前输入）。
+  hostCombo_->clear();
+  hostCombo_->addItems(history_);
+  hostCombo_->setCurrentText(host);
 }
 
 bool DirectViewerWindow::startConnection(const QString& host, quint16 port) {
@@ -350,6 +421,7 @@ void DirectViewerWindow::onSessionConnected() {
   rdDebug("direct-viewer", "session connected");
   everConnected_ = true;
   autoAttempts_ = 0;
+  rememberAddress(autoHost_, autoPort_);  // 连接成功才计入历史
   setStatus(tr("已连接 — 远端画面已弹出"));
   // 连接建立即弹出独立远端画面窗口（工具栏可退出全屏）。
   videoWindow_->showFullscreen();

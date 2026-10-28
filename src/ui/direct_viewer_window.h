@@ -10,6 +10,7 @@
 #include "ui/session_window.h"
 
 class QCloseEvent;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -39,6 +40,8 @@ class DirectViewerWindow : public SessionWindow {
  private:
   QWidget* makeViewerPanel();
   bool startConnection(const QString& host, quint16 port);
+  void loadAddressHistory();
+  void rememberAddress(const QString& host, quint16 port);
   void scheduleAutoReconnect(const QString& reason);
   void onAnswerReceived(const QString& answer);
   void onSignalingFailed(const QString& reason);
@@ -48,8 +51,9 @@ class DirectViewerWindow : public SessionWindow {
   void sendInputEvent(const rd::InputEvent& ev);
   void resetForRetry(const QString& statusText);
 
-  QLineEdit* hostEdit_ = nullptr;
+  QComboBox* hostCombo_ = nullptr;  // 可编辑：下拉为最近连接过的地址历史
   QLineEdit* portEdit_ = nullptr;
+  QStringList history_;             // 最近连接地址（新在前，最多 kMaxHistory 条）
   QPushButton* connectBtn_ = nullptr;
   QPushButton* showVideoBtn_ = nullptr;  // 连接中重新弹出远端画面窗口
   QVector<qint64> screenIds_;           // 被控端屏幕列表（最近一次收到）
