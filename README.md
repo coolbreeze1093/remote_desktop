@@ -1,5 +1,23 @@
 # remote_desktop — P2P 远程桌面（rdc 引擎 + screen_capture_lib + Qt + libdatachannel + OpenH264）
 
+**不经任何服务器、无账号无注册的 P2P 远程桌面（Windows x64）。** 连接数据走 DTLS-SRTP
+端到端加密的点对点通道，不经过任何第三方；被控端可安装为后台服务，锁屏 / UAC /
+登录界面全程可控。
+
+## 快速开始
+
+1. 从 [Releases](https://github.com/coolbreeze1093/remote_desktop/releases/latest)
+   下载 `remote_desktop-*.zip`（约 27MB，已含 Qt 运行库，解压即用，无需安装）
+2. **被控端**运行 `rd_host.exe`，**主控端**运行 `rd_viewer.exe`
+3. 主控端点「创建 Offer」，把文本发给对方；被控端粘贴后「生成 Answer」发回；
+   主控端粘贴 Answer → 连接建立，鼠标键盘即接管
+4. 知道对方 IP？用 `rd_direct_viewer.exe` / `rd_direct_host.exe` 直连模式，填 IP
+   自动握手；想开机就能控？被控端双击 `rd_host.exe` 点「安装后台服务」
+
+详细说明、同机测试与排障见下文。
+
+---
+
 无信令服务器的点对点远程桌面工具：主控端（Viewer）看到被控端（Host）的屏幕，
 并发送鼠标/键盘控制。双方通过**手动复制粘贴 SDP**（Offer/Answer）建立连接，
 连接为 DTLS-SRTP 加密的纯 P2P 通道，不经任何第三方。
@@ -191,3 +209,10 @@ DTLS/track open、抓屏异常、首批帧），双击启动也会记录；排�
   化）；弹窗关掉后可从主界面「显示远端画面」按钮重新打开
 - 设置环境变量 `RD_DUMP_FIRST_FRAME=<png 路径>` 可把 Viewer 解码出的首帧
   存成图片，直接确认采集内容（端到端管线自检）
+
+## 许可证
+
+本项目以 [MIT License](LICENSE) 开源。第三方依赖归各自作者所有：
+libdatachannel、mbedTLS（Apache-2.0）、OpenH264（BSD-2-Clause，注意思科
+二进制预编译需另遵其专利条款，本仓库为源码构建）、libyuv、Qt（GPL/LGPL，
+动态链接）。
