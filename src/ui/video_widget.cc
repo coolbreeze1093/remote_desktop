@@ -237,17 +237,15 @@ void VideoWidget::paintEvent(QPaintEvent*) {
   p.setRenderHint(QPainter::SmoothPixmapTransform);
   const QRect r = videoRect();
   p.drawImage(r, frame_);
-  // 远端光标叠加绘制（宿主侧不再把光标烤进视频）：按视频缩放比同步缩放
-  // 位置与形态，越界（多屏时光标在采集屏外）不画。
+  // 远端光标叠加绘制（宿主侧不再把光标烤进视频）：形态始终按原生像素
+  // 1:1 绘制（大小与被控端屏幕上一致，不随视频缩放/全屏窗口放大），
+  // 位置仍按视频缩放比映射到画面上，越界（多屏时光标在采集屏外）不画。
   if (cursorVisible_ && !cursorImage_.isNull()) {
     if (cursorNx_ >= 0.0 && cursorNx_ <= 1.0 && cursorNy_ >= 0.0 &&
         cursorNy_ <= 1.0) {
-      const double sx = r.width() / static_cast<double>(frame_.width());
-      const double sy = r.height() / static_cast<double>(frame_.height());
       p.drawImage(
-          QRectF(r.left() + cursorNx_ * r.width() - cursorHotX_ * sx,
-                 r.top() + cursorNy_ * r.height() - cursorHotY_ * sy,
-                 cursorImage_.width() * sx, cursorImage_.height() * sy),
+          QPointF(r.left() + cursorNx_ * r.width() - cursorHotX_,
+                  r.top() + cursorNy_ * r.height() - cursorHotY_),
           cursorImage_);
     }
   }
