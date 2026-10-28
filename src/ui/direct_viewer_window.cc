@@ -418,7 +418,7 @@ void DirectViewerWindow::captureThumbnail(const QImage& image) {
   thumbCaptured_ = true;
   const QImage thumb = fitThumbnail(image);
   QBuffer buf;
-  if (!thumb.save(&buf, "JPEG", 85)) {
+  if (!buf.open(QIODevice::WriteOnly) || !thumb.save(&buf, "JPEG", 85)) {
     return;
   }
   const QString entry =
