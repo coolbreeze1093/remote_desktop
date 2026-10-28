@@ -33,6 +33,11 @@ class VideoWidget : public QWidget {
  public slots:
   void setFrame(const QImage& image);
 
+  // 远端光标状态（include_cursor=false 后由本控件本地渲染）：位置为归一化
+  // 坐标 [0..1]（相对远端帧，越界不绘制）；visible=false 隐藏。
+  void setRemoteCursorPos(double nx, double ny, bool visible);
+  void setRemoteCursorShape(const QImage& image, int hotspotX, int hotspotY);
+
  signals:
   void inputEvent(const rd::InputEvent& ev);
   // Double-click on the widget (e.g. re-open the fullscreen remote window
@@ -73,6 +78,13 @@ class VideoWidget : public QWidget {
   QString diagText_;
   int remoteW_ = 0;
   int remoteH_ = 0;
+  // 远端光标（本地渲染，随视频缩放）。
+  QImage cursorImage_;
+  int cursorHotX_ = 0;
+  int cursorHotY_ = 0;
+  double cursorNx_ = 0;
+  double cursorNy_ = 0;
+  bool cursorVisible_ = false;
   // Mouse-move throttle: at most one move per interval, plus a final move
   // when the pointer stops (keeps latency low without flooding the channel).
   qint64 lastMoveMs_ = 0;

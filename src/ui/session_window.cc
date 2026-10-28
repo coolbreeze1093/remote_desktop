@@ -10,10 +10,7 @@ namespace rd {
 SessionWindow::SessionWindow(QWidget* parent) : QMainWindow(parent) {
   session_ = new RemoteDesktopSession(this);
   connect(session_, &RemoteDesktopSession::failed, this,
-          [this](const QString& r) {
-            setStatus(tr("错误: %1").arg(r));
-            QMessageBox::warning(this, tr("远程桌面"), r);
-          });
+          [this](const QString& r) { onSessionFailed(r); });
   connect(session_, &RemoteDesktopSession::connected, this,
           [this] { onSessionConnected(); });
   connect(session_, &RemoteDesktopSession::disconnected, this, [this] {
@@ -34,6 +31,11 @@ void SessionWindow::onSessionConnected() {
 }
 
 void SessionWindow::onSessionDisconnected() {}
+
+void SessionWindow::onSessionFailed(const QString& reason) {
+  setStatus(tr("错误: %1").arg(reason));
+  QMessageBox::warning(this, tr("远程桌面"), reason);
+}
 
 void SessionWindow::setStatus(const QString& text) {
   statusBar()->showMessage(text);

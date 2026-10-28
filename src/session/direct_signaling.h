@@ -10,7 +10,10 @@
 //   8..   payload（UTF-8 SDP 文本）
 //
 // 帧类型约定：
-//   - Offer  ：payload 为 SDP 文本（客户端第一帧）
+//   - Offer  ：payload 为 SDP 文本（客户端第一帧；主控端选屏时为 JSON
+//             {"sdp":..,"screen":id}，仅直连服务模式支持）
+//   - queryScreens：payload = JSON {"type":"queryScreens"}（连上后先查屏幕）
+//   - Screens 应答：payload = JSON info（含 screenIds/screenTitles）
 //   - Answer ：payload 为 SDP 文本（服务端唯一回复帧）
 //   - BYE    ：payload = "BYE"（客户端主动断开通知，服务端收到后停止推流）
 #ifndef REMOTE_DESKTOP_SESSION_DIRECT_SIGNALING_H_
@@ -19,6 +22,8 @@
 #include <QByteArray>
 #include <QObject>
 #include <QString>
+#include <QStringList>
+#include <QVector>
 
 class QTcpServer;
 class QTcpSocket;
@@ -73,6 +78,12 @@ class DirectSignalingClient : public QObject {
   void connectToHost(const QString& host, quint16 port);
   // socketConnected() 之后调用；一次连接只发这一帧。
   void sendOffer(const QString& sdpOffer);
+  // 同上，但把选中的屏幕随 Offer 带给被控端（帧 payload 变为 JSON：
+  // {"sdp":..,"screen":id}；服务模式 relay 解析转发，helper 按屏启动）。
+  void sendOfferWithScreen(const QString& sdpOffer, qint64 screenId);
+  // 查询被控端屏幕列表（服务模式：relay 缓存的 helper info）；结果经
+  // screensReceived 信号返回，拉不到时调用方负责超时兑底。
+  void requestScreens();
   // 发送 BYE 帧通知服务端主动断开（在 abort 之前调用）。
   void sendBye();
   void abort();
@@ -80,6 +91,9 @@ class DirectSignalingClient : public QObject {
  signals:
   void socketConnected();
   void answerReceived(const QString& sdpAnswer);
+  // 被控端屏幕列表（queryScreens 的应答；id 与 title 一一对应）。
+  void screensReceived(const QVector<qint64>& screenIds,
+                       const QStringList& screenTitles);
   // 连不上/超时/协议错/对端提前断开（区别于正常流程的 peerGone）。
   void failed(const QString& reason);
   // Answer 已收到、对端按约定关闭连接（正常流程的收尾）。

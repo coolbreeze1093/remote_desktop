@@ -32,6 +32,7 @@ add_executable(rd_host WIN32
   core/input_injector.cc
   service/host_service_client.cc
   session/remote_desktop_session.cc
+  core/cursor_monitor.cc
   ui/session_window.cc
   ui/host_window.cc)
 
@@ -41,6 +42,7 @@ add_executable(rd_viewer WIN32
   core/input_desktop.cc
   core/input_injector.cc
   session/remote_desktop_session.cc
+  core/cursor_monitor.cc
   ui/session_window.cc
   ui/viewer_window.cc
   ui/remote_video_window.cc
@@ -55,6 +57,7 @@ add_executable(rd_direct_host WIN32
   core/input_injector.cc
   service/host_service_client.cc
   session/remote_desktop_session.cc
+  core/cursor_monitor.cc
   session/direct_signaling.cc
   ui/session_window.cc
   ui/direct_host_window.cc)
@@ -64,6 +67,7 @@ add_executable(rd_direct_viewer WIN32
   core/input_desktop.cc
   core/input_injector.cc
   session/remote_desktop_session.cc
+  core/cursor_monitor.cc
   session/direct_signaling.cc
   ui/session_window.cc
   ui/direct_viewer_window.cc
@@ -80,14 +84,16 @@ add_executable(rd_self_test
   self_test.cc
   core/input_desktop.cc
   core/input_injector.cc
-  session/remote_desktop_session.cc)
+  session/remote_desktop_session.cc
+  core/cursor_monitor.cc)
 
 # Two-process pair test: SDP exchanged via files in the CWD.
 add_executable(rd_pair_test
   pair_test.cc
   core/input_desktop.cc
   core/input_injector.cc
-  session/remote_desktop_session.cc)
+  session/remote_desktop_session.cc
+  core/cursor_monitor.cc)
 
 # GUI repro harness: full host+viewer pipeline in one process plus a real
 # RemoteVideoWindow; scripted minimize/restore to chase the "minimize freezes
@@ -97,6 +103,7 @@ add_executable(rd_mini_test
   core/input_desktop.cc
   core/input_injector.cc
   session/remote_desktop_session.cc
+  core/cursor_monitor.cc
   ui/remote_video_window.cc
   ui/video_widget.cc)
 

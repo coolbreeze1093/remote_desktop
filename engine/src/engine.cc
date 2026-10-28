@@ -288,6 +288,31 @@ class EngineImpl : public Engine {
     inputCb_ = std::move(cb);
   }
 
+  // -------------------------------------------------------------- 光标状态
+
+  void SendCursorPosition(double nx, double ny, bool visible) override {
+    control_.Send(ctrl::EncodeCursorPosition(nx, ny, visible));
+  }
+
+  void SendCursorShape(const CursorShape& shape) override {
+    std::vector<uint8_t> msg = ctrl::EncodeCursorShape(shape);
+    if (!msg.empty()) {
+      control_.Send(msg);
+    }
+  }
+
+  void OnCursorPosition(
+      std::function<void(double, double, bool)> cb) override {
+    std::lock_guard<std::mutex> lock(cbMtx_);
+    cursorPosCb_ = std::move(cb);
+  }
+
+  void OnCursorShape(
+      std::function<void(std::shared_ptr<const CursorShape>)> cb) override {
+    std::lock_guard<std::mutex> lock(cbMtx_);
+    cursorShapeCb_ = std::move(cb);
+  }
+
   // -------------------------------------------------------- 安全桌面状态
 
   void SendSecureDesktopState(bool secure, bool capturable) override {
@@ -365,7 +390,7 @@ class EngineImpl : public Engine {
     control_.Close();
     peer_.Close();
     ShutdownThreads();
-    { std::lock_guard<std::mutex> lock(cbMtx_); videoCb_ = nullptr; inputCb_ = nullptr; stateCb_ = nullptr; errorCb_ = nullptr; qualityCb_ = nullptr; remoteStatsCb_ = nullptr; }
+    { std::lock_guard<std::mutex> lock(cbMtx_); videoCb_ = nullptr; inputCb_ = nullptr; stateCb_ = nullptr; errorCb_ = nullptr; qualityCb_ = nullptr; remoteStatsCb_ = nullptr; cursorPosCb_ = nullptr; cursorShapeCb_ = nullptr; }
     started_ = false;
   }
 
@@ -632,6 +657,38 @@ class EngineImpl : public Engine {
           }
           if (cb) {
             cb(secure, capturable);
+          }
+        });
+        break;
+      }
+      case ctrl::Type::CursorPos: {
+        // Viewer 端：宿主光标位置（派发线程回调，保持发送方顺序）。
+        const double nx = m.cursorNx;
+        const double ny = m.cursorNy;
+        const bool visible = m.cursorVisible;
+        PostTask([this, nx, ny, visible] {
+          std::function<void(double, double, bool)> cb;
+          {
+            std::lock_guard<std::mutex> lock(cbMtx_);
+            cb = cursorPosCb_;
+          }
+          if (cb) {
+            cb(nx, ny, visible);
+          }
+        });
+        break;
+      }
+      case ctrl::Type::CursorShape: {
+        // Viewer 端：宿主光标形态变化（shared_ptr 保活跨线程交付）。
+        std::shared_ptr<const CursorShape> shape = m.cursorShape;
+        PostTask([this, shape = std::move(shape)] {
+          std::function<void(std::shared_ptr<const CursorShape>)> cb;
+          {
+            std::lock_guard<std::mutex> lock(cbMtx_);
+            cb = cursorShapeCb_;
+          }
+          if (cb) {
+            cb(shape);
           }
         });
         break;
@@ -942,6 +999,8 @@ class EngineImpl : public Engine {
   std::function<void(const std::string&)> errorCb_;
   std::function<void(int, int, int, int, int)> qualityCb_;
   std::function<void(int, int, int)> remoteStatsCb_;
+  std::function<void(double nx, double ny, bool visible)> cursorPosCb_;
+  std::function<void(std::shared_ptr<const CursorShape>)> cursorShapeCb_;
 
   // 跨线程诊断计数（采集线程 / rtc 线程 / 宿主线程）
   std::atomic<uint32_t> captured_{0}, encoded_{0}, sent_{0}, dropped_{0};

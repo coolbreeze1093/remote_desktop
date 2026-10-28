@@ -18,7 +18,14 @@ namespace rdpipe {
 // SCM 里的服务注册名。服务本体（注册/卸载）与 GUI 面板（状态探测）共用，
 // 避免改名时两处失同步。
 constexpr wchar_t kServiceName[] = L"RdHostService";
+// 面板管道：服务本体（引擎所在）做服务端。引擎上收进服务后，面板协议
+// （hello/startHost/stopHost/setQuality/setDefaultScreen 与 info/answer/
+// state/secure/error/stats 事件）保持字节级不变，GUI 无需改动。
 constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\rdc-host-ctrl";
+// helper 控制管道：服务（客户端）↔ helper（服务端），只跑采集启停/输入
+// 注入/锁屏上报/屏幕信息。与面板管道分开：面板面向"服务"，控制面向
+// "helper"，两者生命周期与会话切换行为完全不同。
+constexpr wchar_t kHelperPipeName[] = L"\\\\.\\pipe\\rdc-host-helper-ctl";
 constexpr DWORD kMaxMessage = 1u << 20;  // SDP 几 KB，留足余量
 
 // ---------- 构造 ----------
@@ -176,6 +183,15 @@ inline long JsonGetInt(const std::string& json, const std::string& key,
   return strtol(raw.c_str(), nullptr, 10);
 }
 
+inline double JsonGetDouble(const std::string& json, const std::string& key,
+                            double def = 0) {
+  const std::string raw = JsonRawValue(json, key);
+  if (raw.empty() || raw.front() == '"') {
+    return def;
+  }
+  return strtod(raw.c_str(), nullptr);
+}
+
 // 平行数组：[v1,v2,...]（数字数组或字符串数组）。字符串数组返回去引号
 // 且还原转义后的各元素。
 inline bool JsonGetArrayInt(const std::string& json, const std::string& key,
@@ -246,6 +262,63 @@ inline bool JsonGetArrayString(const std::string& json, const std::string& key,
       }
     }
     i = e + 1;
+  }
+  return true;
+}
+
+// ---------- Base64（光标形态位图走 JSON 管道时的二进制承载） ----------
+
+inline std::string Base64Encode(const uint8_t* data, size_t size) {
+  static const char kTable[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve((size + 2) / 3 * 4);
+  size_t i = 0;
+  for (; i + 2 < size; i += 3) {
+    const uint32_t v = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+    out += kTable[(v >> 18) & 0x3f];
+    out += kTable[(v >> 12) & 0x3f];
+    out += kTable[(v >> 6) & 0x3f];
+    out += kTable[v & 0x3f];
+  }
+  if (i < size) {
+    const uint32_t v = data[i] << 16;
+    out += kTable[(v >> 18) & 0x3f];
+    out += kTable[(v >> 12) & 0x3f];
+    out += (i + 1 < size) ? kTable[(((data[i + 1] << 8) | v) >> 6) & 0x3f]
+                          : '=';
+    out += '=';
+  }
+  return out;
+}
+
+inline bool Base64Decode(const std::string& in, std::vector<uint8_t>* out) {
+  out->clear();
+  auto val = [](char c) -> int {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+  };
+  uint32_t acc = 0;
+  int bits = 0;
+  for (char c : in) {
+    if (c == '=' || c == '\r' || c == '\n') {
+      continue;
+    }
+    const int v = val(c);
+    if (v < 0) {
+      out->clear();
+      return false;
+    }
+    acc = (acc << 6) | static_cast<uint32_t>(v);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out->push_back(static_cast<uint8_t>((acc >> bits) & 0xff));
+    }
   }
   return true;
 }

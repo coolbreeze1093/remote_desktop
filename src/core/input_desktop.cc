@@ -52,14 +52,21 @@ std::wstring DesktopName(HDESK h) {
 
 }  // namespace
 
-std::wstring CurrentInputDesktopName(bool* deniedOut) {
+std::wstring CurrentInputDesktopName(bool* deniedOut, unsigned long* errOut) {
   if (deniedOut) {
     *deniedOut = false;
   }
+  if (errOut) {
+    *errOut = 0;
+  }
   HDESK h = OpenInputDesktop(0, FALSE, kDesktopAccess);
   if (!h) {
-    if (deniedOut && GetLastError() == ERROR_ACCESS_DENIED) {
+    const DWORD err = GetLastError();
+    if (deniedOut && err == ERROR_ACCESS_DENIED) {
       *deniedOut = true;
+    }
+    if (errOut) {
+      *errOut = err;
     }
     return {};
   }

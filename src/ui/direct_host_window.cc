@@ -117,6 +117,9 @@ QWidget* DirectHostWindow::makeHostPanel() {
   screenRow->addWidget(new QLabel(tr("共享的屏幕:"), panel));
   screenBox_ = new QComboBox(panel);
   fillLocalScreens();
+  // 服务模式：切换屏幕即推给 helper（startHost 缺省屏）。
+  connect(screenBox_, qOverload<int>(&QComboBox::activated), this,
+          [this](int) { pushDefaultScreen(); });
   screenRow->addWidget(screenBox_, 1);
   lay->addLayout(screenRow);
 
@@ -177,21 +180,25 @@ void DirectHostWindow::autoListen(quint16 port) {
 void DirectHostWindow::onToggleListen() {
   if (listening_) {
     stopListening();
-    if (svcConnected_) {
-      // 服务模式：helper 可能还在推流/等主控端，连会话一起停。
-      awaitSvcAnswer_ = false;
-      svcSessionActive_ = false;
-      svc_->send("{\"type\":\"stopHost\"}");
-    } else {
-      session_->stop();
-    }
+    // 仅本机模式会走到这里（服务模式信令由服务承载，面板不监听）。
+    session_->stop();
     setStatus(tr("已停止监听"));
+    return;
+  }
+  if (svcConnected_) {
+    // 服务模式：TCP 信令由 rd_host_service 承载，面板无需也不应再监听。
+    setStatus(tr("服务模式：信令由被控服务承载（端口 48010），无需监听 —"
+                 "主控端直接连本机 IP 即可"));
     return;
   }
   startListening();
 }
 
 void DirectHostWindow::startListening() {
+  if (svcConnected_) {
+    setStatus(tr("服务模式：信令由被控服务承载（端口 48010），无需监听"));
+    return;
+  }
   bool ok = false;
   const quint16 port = portEdit_->text().toUShort(&ok);
   if (!ok || port == 0) {
@@ -218,21 +225,8 @@ void DirectHostWindow::stopListening() {
 }
 
 void DirectHostWindow::onOfferReceived(const QString& offer) {
+  // 只可能来自本机模式的监听（服务模式下信令在服务本体，不经面板）。
   rdDebug("direct-host", "offer received len=%d", offer.size());
-  if (svcConnected_) {
-    // 服务模式：Offer 转交 helper（SYSTEM）生成 Answer 并推流，answer 事件
-    // 回来后再经信令回给主控端。helper 侧异步执行，不卡 UI/管道。
-    const qint64 screenId = screenBox_->currentData().toLongLong();
-    const std::string json =
-        "{\"type\":\"startHost\",\"screenId\":" + std::to_string(screenId) +
-        ",\"offer\":" + rdpipe::JStr(offer.toStdString()) + "}";
-    awaitSvcAnswer_ = true;
-    svc_->send(json);
-    setStatus(tr("收到 Offer — 已提交被控服务，等待 Answer（ICE 收集最长 ~10s）..."));
-    return;
-  }
-  // 本机模式（服务未装兜底）：GUI 进程自己 startHost + 应用 offer；
-  // 失败内部会 stop() 便于重试。
   setStatus(tr("收到 Offer，正在生成 Answer 并启动推流（ICE 收集最长 ~10s）..."));
   const int64_t screenId = screenBox_->currentData().toLongLong();
   const QString answer = session_->hostAcceptOfferChecked(offer, screenId);
@@ -247,17 +241,9 @@ void DirectHostWindow::onOfferReceived(const QString& offer) {
 }
 
 void DirectHostWindow::onClientLeft() {
-  if (awaitSvcAnswer_) {
-    // 主控端拿到 Answer 前就断开：撤掉提交给服务的启动请求。
-    awaitSvcAnswer_ = false;
-    svc_->send("{\"type\":\"stopHost\"}");
-  } else if (session_->role() == RemoteDesktopSession::Role::Host) {
-    // 客户端通过信令主动断开（BYE）：停止本机推流。
+  if (session_->role() == RemoteDesktopSession::Role::Host) {
+    // 本机模式：客户端通过信令主动断开（BYE）：停止本机推流。
     session_->stop();
-  } else if (svcConnected_ && svcSessionActive_) {
-    // 服务模式已有活跃会话：通知 helper 停止。
-    svcSessionActive_ = false;
-    svc_->send("{\"type\":\"stopHost\"}");
   }
   if (listening_) {
     setStatus(tr("信令连接已关闭，继续监听..."));
@@ -299,6 +285,11 @@ void DirectHostWindow::onSvcInfo(const QString& json) {
   if (screenBox_->count() == 0) {
     screenBox_->addItem(tr("屏幕 0"), QVariant::fromValue<qint64>(0));
   }
+  pushDefaultScreen();  // helper 重启会丢默认屏：每次连上即补推
+  if (listening_) {
+    // 服务就绪：面板监听让位给服务信令（端口 48010 归 rd_host_service）。
+    stopListening();
+  }
   svcState_->setText(
       tr("被控服务: 已连接 helper（%1%2）")
           .arg(QString::fromStdString(version))
@@ -306,9 +297,8 @@ void DirectHostWindow::onSvcInfo(const QString& json) {
   svcState_->setStyleSheet(elevated ? "color: #2e7d32;" : "color: #c62828;");
   svcInstallBtn_->setEnabled(false);
   svcUninstallBtn_->setEnabled(true);
-  if (listening_) {
-    setStatus(tr("正在监听 0.0.0.0:%1（服务模式，推流走被控服务）...")
-                  .arg(portEdit_->text().toUShort()));
+  if (svcConnected_) {
+    setStatus(tr("服务模式：信令由被控服务承载（端口 48010），主控端直连即可"));
   }
   rdDebug("direct-host", "service helper connected (%s)", version.c_str());
 }
@@ -316,14 +306,7 @@ void DirectHostWindow::onSvcInfo(const QString& json) {
 void DirectHostWindow::onSvcEvent(const QString& json) {
   const std::string j = json.toStdString();
   const std::string type = rdpipe::JsonGetString(j, "type");
-  if (type == "answer") {
-    awaitSvcAnswer_ = false;
-    const QString sdp =
-        QString::fromStdString(rdpipe::JsonGetString(j, "sdp"));
-    rdDebug("direct-host", "service answer len=%d", (int)sdp.size());
-    signaling_->sendAnswer(sdp);
-    setStatus(tr("Answer 已回（服务推流中），等待 P2P 建立..."));
-  } else if (type == "state") {
+  if (type == "state") {
     const std::string state = rdpipe::JsonGetString(j, "state");
     svcStateText_ =
         tr("会话状态: %1").arg(QString::fromStdString(state));
@@ -332,10 +315,8 @@ void DirectHostWindow::onSvcEvent(const QString& json) {
       svcStateText_ += tr("（%1）").arg(QString::fromStdString(detail));
     }
     if (state == "connected") {
-      svcSessionActive_ = true;
       setStatus(tr("已连接 — 主控端正在查看与操作本机（服务推流）"));
     } else if (state == "closed" || state == "failed") {
-      svcSessionActive_ = false;
       if (listening_) {
         setStatus(tr("会话结束，继续监听..."));
       }
@@ -358,16 +339,11 @@ void DirectHostWindow::onSvcEvent(const QString& json) {
       lockHint_->show();
     }
   } else if (type == "error") {
+    // 信令中继在服务本体：这里只展示，不再负责断开等 Answer 的客户端。
     const QString msg =
         QString::fromStdString(rdpipe::JsonGetString(j, "msg"));
-    if (awaitSvcAnswer_) {
-      // Answer 没生成出来：立刻断开等着的信令客户端（主控端立即收到
-      // "服务端忙或拒绝"，不用干等 25s 超时），继续监听。
-      failPendingSignaling(tr("服务生成 Answer 失败（%1）").arg(msg));
-    } else {
-      svcStateText_ = tr("错误: %1").arg(msg);
-      refreshSvcStatus();
-    }
+    svcStateText_ = tr("错误: %1").arg(msg);
+    refreshSvcStatus();
   } else if (type == "stats") {
     static const char* kLevelNames[] = {"流畅", "高清", "超清"};
     svcStatsText_ =
@@ -438,10 +414,6 @@ void DirectHostWindow::onSvcStatus(bool installed, bool running) {
 void DirectHostWindow::onSvcGone() {
   const bool wasConnected = svcConnected_;
   svcConnected_ = false;
-  svcSessionActive_ = false;
-  if (awaitSvcAnswer_) {
-    failPendingSignaling(tr("被控服务连接断开"));
-  }
   refreshSvcStateLabel();
   svcInstallBtn_->setEnabled(true);
   svcUninstallBtn_->setEnabled(svcInstalled_);
@@ -454,10 +426,14 @@ void DirectHostWindow::onSvcGone() {
   }
 }
 
-void DirectHostWindow::failPendingSignaling(const QString& reason) {
-  awaitSvcAnswer_ = false;
-  signaling_->rejectClient();
-  setStatus(tr("%1，继续监听").arg(reason));
+void DirectHostWindow::pushDefaultScreen() {
+  if (!svcConnected_ || !screenBox_) {
+    return;
+  }
+  const qint64 id = screenBox_->currentData().toLongLong();
+  svc_->send("{\"type\":\"setDefaultScreen\",\"screenId\":" +
+             std::to_string(id) + "}");
+  rdDebug("direct-host", "default screen pushed (%lld)", (long long)id);
 }
 
 void DirectHostWindow::onSvcInstall() {

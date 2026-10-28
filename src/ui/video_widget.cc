@@ -142,6 +142,9 @@ VideoWidget::VideoWidget(QWidget* parent) : QWidget(parent) {
   setFocusPolicy(Qt::StrongFocus);
   // 让 IME 在本控件上激活（中文等输入法提交时才有 inputMethodEvent）。
   setAttribute(Qt::WA_InputMethodEnabled, true);
+  // 隐藏本地光标：远端光标由 paintEvent 按宿主上报的位置/形态绘制，
+  // 本地箭头叠加在上面会导致"双光标"且形态永远与远端对不上。
+  setCursor(Qt::BlankCursor);
   setMinimumSize(320, 180);
   moveTimer_ = new QTimer(this);
   moveTimer_->setSingleShot(true);
@@ -182,6 +185,21 @@ void VideoWidget::setFrame(const QImage& image) {
   update();
 }
 
+void VideoWidget::setRemoteCursorPos(double nx, double ny, bool visible) {
+  cursorNx_ = nx;
+  cursorNy_ = ny;
+  cursorVisible_ = visible;
+  update();
+}
+
+void VideoWidget::setRemoteCursorShape(const QImage& image, int hotspotX,
+                                       int hotspotY) {
+  cursorImage_ = image;
+  cursorHotX_ = hotspotX;
+  cursorHotY_ = hotspotY;
+  update();
+}
+
 void VideoWidget::paintEvent(QPaintEvent*) {
   QPainter p(this);
   p.fillRect(rect(), QColor(10, 10, 14));
@@ -195,7 +213,22 @@ void VideoWidget::paintEvent(QPaintEvent*) {
     return;
   }
   p.setRenderHint(QPainter::SmoothPixmapTransform);
-  p.drawImage(videoRect(), frame_);
+  const QRect r = videoRect();
+  p.drawImage(r, frame_);
+  // 远端光标叠加绘制（宿主侧不再把光标烤进视频）：按视频缩放比同步缩放
+  // 位置与形态，越界（多屏时光标在采集屏外）不画。
+  if (cursorVisible_ && !cursorImage_.isNull()) {
+    if (cursorNx_ >= 0.0 && cursorNx_ <= 1.0 && cursorNy_ >= 0.0 &&
+        cursorNy_ <= 1.0) {
+      const double sx = r.width() / static_cast<double>(frame_.width());
+      const double sy = r.height() / static_cast<double>(frame_.height());
+      p.drawImage(
+          QRectF(r.left() + cursorNx_ * r.width() - cursorHotX_ * sx,
+                 r.top() + cursorNy_ * r.height() - cursorHotY_ * sy,
+                 cursorImage_.width() * sx, cursorImage_.height() * sy),
+          cursorImage_);
+    }
+  }
 }
 
 void VideoWidget::emitMouseMove(const QPointF& n) {

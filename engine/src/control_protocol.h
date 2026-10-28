@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #include "rdc/engine.h"
@@ -34,6 +35,8 @@ enum class Type : uint8_t {
   QualityMode = 4,  // Viewer -> Host，{u8 mode}
   KeyframeReq = 5,  // Viewer -> Host，空 payload（手动补 IDR，配合 RTCP PLI）
   SecureDesktop = 6,  // Host -> Viewer，{u8 secure, u8 capturable} 锁屏/UAC 状态
+  CursorPos = 7,      // Host -> Viewer，{u8 visible, f32 nx, f32 ny}
+  CursorShape = 8,    // Host -> Viewer，{u16 w,u16 h,u16 hx,u16 hy,BGRA...}
 };
 
 // InputEvent 定长 payload 大小：1+8+8+4+1+4+4+1 = 31，对齐到 32。
@@ -61,6 +64,12 @@ inline void PutF64(std::vector<uint8_t>& b, size_t& o, double v) {
   Put32(b, o, static_cast<uint32_t>(bits & 0xFFFFFFFFu));
   Put32(b, o, static_cast<uint32_t>((bits >> 32) & 0xFFFFFFFFu));
 }
+inline void PutF32(std::vector<uint8_t>& b, size_t& o, float v) {
+  uint32_t bits = 0;
+  static_assert(sizeof(bits) == sizeof(v), "float must be 32-bit");
+  std::memcpy(&bits, &v, sizeof(bits));
+  Put32(b, o, bits);
+}
 inline uint8_t Get8(const uint8_t* p, size_t& o) { return p[o++]; }
 inline uint16_t Get16(const uint8_t* p, size_t& o) {
   const uint16_t v = static_cast<uint16_t>(p[o]) |
@@ -81,6 +90,12 @@ inline double GetF64(const uint8_t* p, size_t& o) {
       static_cast<uint64_t>(Get32(p, o)) |
       (static_cast<uint64_t>(Get32(p, o)) << 32);
   double v = 0;
+  std::memcpy(&v, &bits, sizeof(v));
+  return v;
+}
+inline float GetF32(const uint8_t* p, size_t& o) {
+  const uint32_t bits = Get32(p, o);
+  float v = 0;
   std::memcpy(&v, &bits, sizeof(v));
   return v;
 }
@@ -159,6 +174,41 @@ inline std::vector<uint8_t> EncodeSecureDesktopState(bool secure,
   return out;
 }
 
+// 光标位置（归一化坐标，f32 足够 4K 精度：1/3840 ≈ 2.6e-4）。
+inline std::vector<uint8_t> EncodeCursorPosition(double nx, double ny,
+                                                 bool visible) {
+  std::vector<uint8_t> out;
+  AppendHeader(out, Type::CursorPos, 9);
+  size_t o = kHeaderSize;
+  Put8(out, o, visible ? 1 : 0);
+  PutF32(out, o, static_cast<float>(nx));
+  PutF32(out, o, static_cast<float>(ny));
+  return out;
+}
+
+// 光标形态（预乘 ARGB，BGRA 内存序）。上限 256x256：系统/应用光标远小于
+// 此，超限一律拒绝，防异常数据撑爆 DataChannel。
+constexpr uint32_t kCursorShapeMaxDim = 256;
+
+inline std::vector<uint8_t> EncodeCursorShape(const CursorShape& s) {
+  const uint32_t pixels = s.width * s.height;
+  if (s.width == 0 || s.height == 0 || s.width > kCursorShapeMaxDim ||
+      s.height > kCursorShapeMaxDim ||
+      s.bgra.size() != static_cast<size_t>(pixels) * 4) {
+    return {};
+  }
+  const size_t payloadLen = 8 + s.bgra.size();
+  std::vector<uint8_t> out;
+  AppendHeader(out, Type::CursorShape, payloadLen);
+  size_t o = kHeaderSize;
+  Put16(out, o, static_cast<uint16_t>(s.width));
+  Put16(out, o, static_cast<uint16_t>(s.height));
+  Put16(out, o, static_cast<uint16_t>(s.hotspotX));
+  Put16(out, o, static_cast<uint16_t>(s.hotspotY));
+  std::memcpy(out.data() + o, s.bgra.data(), s.bgra.size());
+  return out;
+}
+
 // ---- 解码 ----
 
 struct Message {
@@ -172,6 +222,10 @@ struct Message {
   int qualityMode = 0;     // Type::QualityMode
   bool secureDesktop = false;      // Type::SecureDesktop
   bool secureCapturable = false;   // Type::SecureDesktop
+  double cursorNx = 0;             // Type::CursorPos
+  double cursorNy = 0;
+  bool cursorVisible = false;
+  std::shared_ptr<CursorShape> cursorShape;  // Type::CursorShape（堆上带数据）
 };
 
 // 严格校验 magic/version/长度；成功返回 true 并填充 out。
@@ -256,6 +310,41 @@ inline bool Decode(const uint8_t* data, size_t size, Message& out) {
       out.type = Type::SecureDesktop;
       out.secureDesktop = payload[0] != 0;
       out.secureCapturable = payload[1] != 0;
+      return true;
+    }
+    case Type::CursorPos: {
+      if (len != 9) {
+        return false;
+      }
+      out.type = Type::CursorPos;
+      size_t p = 0;
+      out.cursorVisible = Get8(payload, p) != 0;
+      out.cursorNx = GetF32(payload, p);
+      out.cursorNy = GetF32(payload, p);
+      return true;
+    }
+    case Type::CursorShape: {
+      if (len < 8) {
+        return false;
+      }
+      size_t p = 0;
+      const uint32_t w = Get16(payload, p);
+      const uint32_t h = Get16(payload, p);
+      const uint32_t hx = Get16(payload, p);
+      const uint32_t hy = Get16(payload, p);
+      if (w == 0 || h == 0 || w > kCursorShapeMaxDim ||
+          h > kCursorShapeMaxDim ||
+          len != 8 + static_cast<size_t>(w) * h * 4) {
+        return false;
+      }
+      auto shape = std::make_shared<CursorShape>();
+      shape->width = w;
+      shape->height = h;
+      shape->hotspotX = hx;
+      shape->hotspotY = hy;
+      shape->bgra.assign(payload + 8, payload + len);
+      out.type = Type::CursorShape;
+      out.cursorShape = std::move(shape);
       return true;
     }
     default:

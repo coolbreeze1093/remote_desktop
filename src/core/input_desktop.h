@@ -18,8 +18,11 @@ namespace rd {
 
 // 当前接收输入的桌面名（"Default"/"Winlogon"…）。探测失败返回空串；
 // deniedOut 非空时写入"是否因权限不足打不开输入桌面"（未提权进程遇安全
-// 桌面的固定特征），调用方借此区分"锁屏且无权限"与"探测失败"。
-std::wstring CurrentInputDesktopName(bool* deniedOut = nullptr);
+// 桌面的固定特征），调用方借此区分"锁屏且无权限"与"探测失败"；errOut
+// 非空时写入 OpenInputDesktop 的原始错误码（桌面探测失败的诊断线索）。
+// （unsigned long 即 DWORD，头文件不拖 windows.h。）
+std::wstring CurrentInputDesktopName(bool* deniedOut = nullptr,
+                                     unsigned long* errOut = nullptr);
 
 // 是否为安全桌面（锁屏/UAC）。名字为空按"未知"处理，返回 false。
 bool IsSecureDesktopName(const std::wstring& name);

@@ -4,6 +4,7 @@
 #include <QMetaObject>
 
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -40,9 +41,10 @@ class RemoteDesktopSession::CaptureSink final : public FrameSink {
     if (!alive_->load(std::memory_order_acquire)) {
       return;
     }
-    // InputInjector 字段是原子的，采集线程直接更新即可。
+    // InputInjector / CursorMonitor 字段是原子的，采集线程直接更新即可。
     s_->injector_.setFrameOrigin(ox, oy);
     s_->injector_.setFrameSize(w, h);
+    s_->cursor_.setFrameGeometry(ox, oy, w, h);
     static std::atomic<int> dbg{0};
     if (dbg.fetch_add(1) < 3) {
       rdDebug("session", "geometry origin=(%d,%d) size=%dx%d", ox, oy, w, h);
@@ -89,6 +91,11 @@ void RemoteDesktopSession::wireEngineCallbacks() {
       case rdc::State::Connected:
         rdDebug("session", "connected (role=%s)",
                 role_ == Role::Host ? "host" : "viewer");
+        if (role_ == Role::Host) {
+          // 主控端刚连上：补发当前光标位置/形态，否则要等下一次变化才能
+          // 看到光标。
+          cursor_.Poll(true);
+        }
         emit connected();
         break;
       case rdc::State::Closed:
@@ -126,8 +133,37 @@ void RemoteDesktopSession::wireEngineCallbacks() {
       return;
     }
     injector_.inject(ev);
+    if (ev.type == InputEvent::Type::MouseMove ||
+        ev.type == InputEvent::Type::MouseButton) {
+      // 注入后立即回报光标位置：主控端本地光标不等下一个采集帧就能跟上。
+      cursor_.Poll();
+    }
     emit inputInjected();
   });
+
+  // Viewer：宿主光标位置/形态 → 信号（引擎派发线程触发）。
+  engine_->OnCursorPosition(
+      [this, alive](double nx, double ny, bool visible) {
+        if (!alive->load(std::memory_order_acquire)) {
+          return;
+        }
+        emit cursorMoved(nx, ny, visible);
+      });
+  engine_->OnCursorShape(
+      [this, alive](std::shared_ptr<const rdc::CursorShape> shape) {
+        if (!alive->load(std::memory_order_acquire) || !shape) {
+          return;
+        }
+        QImage img(static_cast<int>(shape->width),
+                   static_cast<int>(shape->height),
+                   QImage::Format_ARGB32_Premultiplied);
+        if (shape->bgra.size() != static_cast<size_t>(img.sizeInBytes())) {
+          return;
+        }
+        std::memcpy(img.bits(), shape->bgra.data(), shape->bgra.size());
+        emit cursorShapeChanged(img, static_cast<int>(shape->hotspotX),
+                                static_cast<int>(shape->hotspotY));
+      });
 
   // Viewer：解码帧 → QImage → frameReady（引擎解码线程触发）。
   engine_->OnVideoFrame(
@@ -181,6 +217,27 @@ bool RemoteDesktopSession::startHost(int64_t screenId) {
   config.iceServers = {"stun.miwifi.com:3478"};
   engine_ = std::shared_ptr<rdc::Engine>(rdc::Engine::Create(rdc::Role::Host, config));
   wireEngineCallbacks();
+  // 光标轮询 → 控制通道（采集线程与注入线程都会触发；alive_ 兜底防止
+  // stop 后误触引擎）。
+  const auto alive = alive_;
+  cursor_.setCallbacks(
+      [this, alive](double nx, double ny, bool visible) {
+        if (alive->load(std::memory_order_acquire) && engine_) {
+          engine_->SendCursorPosition(nx, ny, visible);
+        }
+      },
+      [this, alive](const CursorShapeData& shape) {
+        if (!alive->load(std::memory_order_acquire) || !engine_) {
+          return;
+        }
+        rdc::CursorShape cs;
+        cs.width = static_cast<uint32_t>(shape.width);
+        cs.height = static_cast<uint32_t>(shape.height);
+        cs.hotspotX = static_cast<uint32_t>(shape.hotspotX);
+        cs.hotspotY = static_cast<uint32_t>(shape.hotspotY);
+        cs.bgra = shape.bgra;
+        engine_->SendCursorShape(cs);
+      });
   if (!engine_->Start()) {
     stop();
     emit failed(QStringLiteral("编码器初始化失败"));
@@ -188,7 +245,7 @@ bool RemoteDesktopSession::startHost(int64_t screenId) {
   }
   sink_ = std::make_unique<CaptureSink>(this, alive_);
   capture_ = std::make_unique<ScreenCaptureThread>();
-  if (!capture_->start(screenId, kCaptureFps, sink_.get())) {
+  if (!capture_->start(screenId, kCaptureFps, sink_.get(), &cursor_)) {
     rdDebug("session", "capture start FAILED (screen=%lld)",
             (long long)screenId);
     stop();

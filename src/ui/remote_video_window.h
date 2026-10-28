@@ -24,6 +24,14 @@ class RemoteVideoWindow : public QWidget {
   // Displays one decoded remote frame.
   void setFrame(const QImage& image);
 
+  // 远端光标状态（转发给内嵌 VideoWidget 本地渲染）。
+  void setRemoteCursorPos(double nx, double ny, bool visible) {
+    video_->setRemoteCursorPos(nx, ny, visible);
+  }
+  void setRemoteCursorShape(const QImage& image, int hotspotX, int hotspotY) {
+    video_->setRemoteCursorShape(image, hotspotX, hotspotY);
+  }
+
   // Diagnostic line shown while no frame has been displayed yet.
   void setDiagText(const QString& text);
 

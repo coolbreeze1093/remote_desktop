@@ -68,6 +68,14 @@ struct Config {
   std::vector<std::string> iceServers;
 };
 
+// 光标形态：width*height 的预乘 ARGB 位图（内存序 BGRA）+ 热点（原生像素）。
+// Host 采集后仅在形态变化时发送；Viewer 按视频缩放比同步缩放显示。
+struct CursorShape {
+  uint32_t width = 0, height = 0;
+  uint32_t hotspotX = 0, hotspotY = 0;
+  std::vector<uint8_t> bgra;  // width*height*4
+};
+
 // 诊断统计：口径与旧 rd::RemoteDesktopSession::DiagStats 完全一致。
 // Host 关注 captured/encoded/sent/dropped/quality*；Viewer 关注
 // received/decoded/decodeFailed 与 encodeWidth/Height（来自 FrameMeta）。
@@ -127,6 +135,17 @@ class Engine {
   virtual void SendInput(const InputEvent& ev) = 0;  // Viewer -> Host
   virtual void OnInput(
       std::function<void(const InputEvent&)> cb) = 0;  // Host 端接收
+
+  // ---- 光标（include_cursor=false 后由 Viewer 本地渲染）----
+  // Host：位置/形态变化时上报；位置为归一化坐标 [0..1]（相对采集帧，越界
+  // 值合法，Viewer 自行裁剪）。连接建立后应 force 重发一次当前状态。
+  virtual void SendCursorPosition(double nx, double ny, bool visible) = 0;
+  virtual void SendCursorShape(const CursorShape& shape) = 0;
+  // Viewer：收到宿主光标状态（派发线程触发；shape 由 shared_ptr 保活）。
+  virtual void OnCursorPosition(
+      std::function<void(double nx, double ny, bool visible)> cb) = 0;
+  virtual void OnCursorShape(
+      std::function<void(std::shared_ptr<const CursorShape>)> cb) = 0;
 
   // ---- 安全桌面（锁屏/UAC）状态 ----
   // Host 侧：采集线程探测到输入桌面切换时上报，经控制通道送达 Viewer。

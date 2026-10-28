@@ -114,6 +114,61 @@ int main() {
     Message m;
     CHECK(!DecodeOk(bad, m));
   }
+  // ---- 光标位置（f32 归一化坐标）----
+  {
+    const auto bytes = EncodeCursorPosition(0.25, 0.75, true);
+    CHECK(bytes.size() == kHeaderSize + 9);
+    CHECK(bytes[2] == static_cast<uint8_t>(Type::CursorPos));
+    Message m;
+    CHECK(DecodeOk(bytes, m));
+    CHECK(m.type == Type::CursorPos);
+    CHECK(m.cursorVisible);
+    // f32 精度足够 4K 归一化坐标（1/3840 ≈ 2.6e-4）
+    CHECK((m.cursorNx - 0.25) < 1e-6 && (0.25 - m.cursorNx) < 1e-6);
+    CHECK((m.cursorNy - 0.75) < 1e-6 && (0.75 - m.cursorNy) < 1e-6);
+    // 负坐标（多屏光标在采集屏左侧）往返
+    const auto neg = EncodeCursorPosition(-0.5, 1.25, false);
+    CHECK(DecodeOk(neg, m));
+    CHECK(!m.cursorVisible);
+    CHECK(m.cursorNx < -0.4999 && m.cursorNx > -0.5001);
+    auto bad = EncodeCursorPosition(0, 0, true);
+    bad.pop_back();
+    CHECK(!DecodeOk(bad, m));
+  }
+  // ---- 光标形态（BGRA 位图往返 + 尺寸校验）----
+  {
+    CursorShape s;
+    s.width = 4;
+    s.height = 2;
+    s.hotspotX = 1;
+    s.hotspotY = 2;
+    s.bgra.assign(static_cast<size_t>(s.width) * s.height * 4, 0x7f);
+    const auto bytes = EncodeCursorShape(s);
+    CHECK(bytes.size() == kHeaderSize + 8 + s.bgra.size());
+    CHECK(bytes[2] == static_cast<uint8_t>(Type::CursorShape));
+    Message m;
+    CHECK(DecodeOk(bytes, m));
+    CHECK(m.type == Type::CursorShape && m.cursorShape);
+    CHECK(m.cursorShape->width == 4 && m.cursorShape->height == 2);
+    CHECK(m.cursorShape->hotspotX == 1 && m.cursorShape->hotspotY == 2);
+    CHECK(m.cursorShape->bgra.size() == s.bgra.size());
+    CHECK(m.cursorShape->bgra.back() == 0x7f);
+    // 截断 / 尺寸不符 / 超上限一律拒绝
+    auto bad = bytes;
+    bad.pop_back();
+    CHECK(!DecodeOk(bad, m));
+    auto badHeader = bytes;
+    badHeader[kHeaderSize] = 0xFF;  // width 低字节改大 → 与 payload 长度不符
+    CHECK(!DecodeOk(badHeader, m));
+    CursorShape tooBig;
+    tooBig.width = kCursorShapeMaxDim + 1;
+    tooBig.height = 1;
+    tooBig.bgra.assign(
+        static_cast<size_t>(tooBig.width) * tooBig.height * 4, 0);
+    CHECK(EncodeCursorShape(tooBig).empty());
+    CursorShape emptyShape;
+    CHECK(EncodeCursorShape(emptyShape).empty());
+  }
   // ---- 拒绝路径 ----
   {
     const auto good = EncodeQualityMode(2);

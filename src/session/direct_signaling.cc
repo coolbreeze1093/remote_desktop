@@ -1,5 +1,9 @@
 #include "session/direct_signaling.h"
 
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
@@ -233,6 +237,25 @@ void DirectSignalingClient::sendOffer(const QString& sdpOffer) {
   socket_->flush();
 }
 
+void DirectSignalingClient::sendOfferWithScreen(const QString& sdpOffer,
+                                                qint64 screenId) {
+  QJsonObject obj;
+  obj.insert(QStringLiteral("sdp"), sdpOffer);
+  // QJson 无 qint64 接口：屏幕索引是小整数，double 精度足够。
+  obj.insert(QStringLiteral("screen"), static_cast<double>(screenId));
+  QByteArray frame;
+  AppendFrame(frame, QJsonDocument(obj).toJson(QJsonDocument::Compact));
+  socket_->write(frame);
+  socket_->flush();
+}
+
+void DirectSignalingClient::requestScreens() {
+  QByteArray frame;
+  AppendFrame(frame, QByteArray("{\"type\":\"queryScreens\"}"));
+  socket_->write(frame);
+  socket_->flush();
+}
+
 void DirectSignalingClient::sendBye() {
   QByteArray frame;
   AppendFrame(frame, QByteArray("BYE", 3));
@@ -250,10 +273,31 @@ void DirectSignalingClient::onReadyRead() {
       fail(QStringLiteral("对端不是远程桌面直连服务端（协议不匹配）"));
       return;
     case FrameResult::kOk:
-      gotAnswer_ = true;
-      emit answerReceived(payload);
-      return;
+      break;
   }
+  // JSON 控制帧（选屏列表等）；Answer 是裸 SDP（'v=' 开头），不会撞。
+  if (payload.startsWith('{')) {
+    const QJsonObject obj = QJsonDocument::fromJson(payload.toUtf8()).object();
+    const QString type = obj.value(QStringLiteral("type")).toString();
+    if (type == QStringLiteral("info") || type == QStringLiteral("screens")) {
+      QVector<qint64> ids;
+      QStringList titles;
+      const auto idArr = obj.value(QStringLiteral("screenIds")).toArray();
+      const auto titleArr = obj.value(QStringLiteral("screenTitles")).toArray();
+      for (const auto& v : idArr) {
+        ids.append(static_cast<qint64>(v.toDouble()));
+      }
+      for (const auto& v : titleArr) {
+        titles.append(v.toString());
+      }
+      emit screensReceived(ids, titles);
+    }
+    // 其他/未知 JSON 帧忽略，继续等 Answer。
+    return;
+  }
+  gotAnswer_ = true;
+  emit answerReceived(payload);
+  return;
 }
 
 void DirectSignalingClient::onDisconnected() {

@@ -42,7 +42,17 @@ inline void rdcDebug(const char* tag, const char* fmt, ...) {
     disabled.store(true, std::memory_order_relaxed);
     return;
   }
+  // 每行带本地时间戳：两端（主控/被控）日志对时序、关联断开瞬间靠它。
+#ifdef _WIN32
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  std::fprintf(f, "[%04u-%02u-%02u %02u:%02u:%02u.%03u][%s] ",
+               (unsigned)st.wYear, (unsigned)st.wMonth, (unsigned)st.wDay,
+               (unsigned)st.wHour, (unsigned)st.wMinute, (unsigned)st.wSecond,
+               (unsigned)st.wMilliseconds, tag);
+#else
   std::fprintf(f, "[%s] ", tag);
+#endif
   va_list ap;
   va_start(ap, fmt);
   std::vfprintf(f, fmt, ap);

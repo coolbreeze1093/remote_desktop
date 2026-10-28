@@ -20,6 +20,11 @@ ViewerWindow::ViewerWindow(QWidget* parent) : SessionWindow(parent) {
   // Frames arrive on libdatachannel threads; queue them to the video window.
   connect(session_, &RemoteDesktopSession::frameReady, videoWindow_,
           &RemoteVideoWindow::setFrame, Qt::QueuedConnection);
+  // 远端光标本地渲染（宿主不再把光标烤进视频）。
+  connect(session_, &RemoteDesktopSession::cursorMoved, videoWindow_,
+          &RemoteVideoWindow::setRemoteCursorPos, Qt::QueuedConnection);
+  connect(session_, &RemoteDesktopSession::cursorShapeChanged, videoWindow_,
+          &RemoteVideoWindow::setRemoteCursorShape, Qt::QueuedConnection);
   connect(videoWindow_, &RemoteVideoWindow::disconnectRequested, this, [this] {
     if (session_->role() != RemoteDesktopSession::Role::None) {
       session_->stop();
@@ -61,6 +66,10 @@ ViewerWindow::ViewerWindow(QWidget* parent) : SessionWindow(parent) {
   // The embedded preview is built inside makeViewerTab(); feed it frames now.
   connect(session_, &RemoteDesktopSession::frameReady, viewerPreview_,
           &VideoWidget::setFrame, Qt::QueuedConnection);
+  connect(session_, &RemoteDesktopSession::cursorMoved, viewerPreview_,
+          &VideoWidget::setRemoteCursorPos, Qt::QueuedConnection);
+  connect(session_, &RemoteDesktopSession::cursorShapeChanged, viewerPreview_,
+          &VideoWidget::setRemoteCursorShape, Qt::QueuedConnection);
 }
 
 void ViewerWindow::onSessionConnected() {

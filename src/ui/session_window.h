@@ -31,6 +31,10 @@ class SessionWindow : public QMainWindow {
   virtual void onSessionConnected();
   virtual void onSessionDisconnected();
 
+  // 引擎报错（OnError/Failed）：默认弹窗；子类可覆盖（如自动重连期间
+  // 只改状态栏不弹模态框，避免重试被弹窗阻断）。
+  virtual void onSessionFailed(const QString& reason);
+
   // updateDiag() 每秒生成管道诊断文本后的额外出口
   // （Viewer 转发给全屏窗口与内嵌预览；Host 无视频面，无需出口）。
   virtual void applyDiagText(const QString& text) { (void)text; }

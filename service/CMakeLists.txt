@@ -3,8 +3,12 @@
 add_executable(rd_host_service
   service_main.cc
   host_helper.cc
+  host_config.cc
+  host_session.cc
+  signal_relay.cc
   "${CMAKE_SOURCE_DIR}/src/core/input_desktop.cc"
-  "${CMAKE_SOURCE_DIR}/src/core/input_injector.cc")
+  "${CMAKE_SOURCE_DIR}/src/core/input_injector.cc"
+  "${CMAKE_SOURCE_DIR}/src/core/cursor_monitor.cc")
 
 target_include_directories(rd_host_service PRIVATE
   "${CMAKE_SOURCE_DIR}/src"

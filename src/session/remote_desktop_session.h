@@ -18,6 +18,7 @@
 #include <QObject>
 #include <QString>
 
+#include "core/cursor_monitor.h"
 #include "core/input_event.h"
 #include "core/input_injector.h"
 #include "session/screen_capture_thread.h"
@@ -86,6 +87,10 @@ class RemoteDesktopSession : public QObject {
   void hostSecureDesktopChanged(bool secure, bool capturable);
   // Viewer：收到宿主的锁屏状态变化（引擎派发线程触发）。
   void peerSecureDesktopChanged(bool secure, bool capturable);
+  // Viewer：宿主光标位置（归一化坐标，相对采集帧）与形态变化（引擎派发
+  // 线程触发）。光标不再烤入视频，查看端据此本地渲染。
+  void cursorMoved(double nx, double ny, bool visible);
+  void cursorShapeChanged(const QImage& image, int hotspotX, int hotspotY);
 
  private:
   friend struct SelfTestHooks;
@@ -107,6 +112,8 @@ class RemoteDesktopSession : public QObject {
   std::unique_ptr<ScreenCaptureThread> capture_;
   std::unique_ptr<FrameSink> sink_;
   InputInjector injector_;
+  // 被控端光标轮询（Host 专用；采集线程每帧 + 注入后即时各 Poll 一次）。
+  CursorMonitor cursor_;
 };
 
 }  // namespace rd

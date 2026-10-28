@@ -3,17 +3,20 @@
 // 用法（同名 exe，按第一个参数分派）：
 //   --service              SCM 入口（仅由服务管理器启动）
 //   --helper [--session N] 会话 helper（由服务以 SYSTEM 在控制台会话内拉起，
-//                          实现在 host_helper.cc）
+//                          实现在 host_helper.cc，只做采集+注入+共享内存写）
 //   --install [--quiet]    注册服务（需管理员），装完立即启动
 //   --uninstall [--quiet]  停止并卸载服务，清掉残留 helper
 //
 // 服务本体是个监督者：轮询活动控制台会话（WTSGetActiveConsoleSessionId），
 // 把自己复制成目标会话内的 SYSTEM 进程跑 helper；会话切换/helper 退出时
-// 自动重启。helper 才是干活的（采集/编码/引擎/注入），服务里没有任何业务。
+// 自动重启。业务都在服务里（host_session.cc）：WebRTC 引擎/编码/信令/面板
+// 管道常驻 session 0，helper 消亡（解锁/切会话）只冻结画面几秒，主控端连
+// 接不断——新 helper 拉起后经控制管道重发 startCapture 续上。
 //
-// 为什么服务不能直接干活：服务活在 session 0，看不见也摸不着交互桌面的
-// 采集与输入；必须把进程"搬"进控制台会话（复制令牌 + SetTokenInformation
-// TokenSessionId + CreateProcessAsUser）。
+// 为什么采集与注入必须"搬"进控制台会话：服务活在 session 0，看不见也摸不
+// 着交互桌面的采集与输入；必须把进程"搬"进控制台会话（复制令牌 +
+// SetTokenInformation TokenSessionId + CreateProcessAsUser）。帧回传服务
+// 走跨会话共享内存（frame_ring.h），输入经控制管道下发（pipe_proto.h）。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -25,11 +28,15 @@
 #include <wtsapi32.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "core/input_desktop.h"  // IsProcessElevated（服务身份落日志）
 #include "debug_log.h"
+#include "host_config.h"
+#include "host_session.h"
 #include "pipe_proto.h"
+#include "signal_relay.h"
 
 // host_helper.cc 提供：会话内被控端进程入口。
 int RunHostHelper();
@@ -38,6 +45,8 @@ namespace {
 
 constexpr wchar_t kServiceDisplay[] = L"RemoteDesktop Host Service";
 constexpr DWORD kInvalidSession = 0xFFFFFFFFu;
+// 信令端口不再是常量：exe 旁 rd_host.ini 的 port= 可配（host_config.h），
+// 缺省仍是 48010，与旧面板信令端口一致。
 
 using rdpipe::kServiceName;
 
@@ -220,7 +229,14 @@ void KillHelper() {
 // 监督循环：跟随活动控制台会话，helper 掉了（崩溃/会话注销）就重拉。
 // 未登录（无活动会话）时等待，登录界面（logon 桌面）本身算活动会话，
 // 因此开机到登录前 helper 也在运行——登录画面可控。
+// 会话切换防抖只保护"活着的 helper"：RDP 同账户连接/断开时
+// WTSGetActiveConsoleSessionId 可能短暂 flicker，连续 3 次（6s）稳定才杀
+// helper 切换。helper 已死（典型：解锁瞬间系统拆除旧登录会话，helper 随
+// 之消亡、进行中的远程会话被打断）则没有可误杀的对象——立即在当前会话
+// 重拉，恢复窗口从防抖 6s+ 压到一个轮询周期（≤2s）。
 DWORD WINAPI SupervisorLoop(LPVOID) {
+  DWORD pendingSession = kInvalidSession;
+  int pendingTicks = 0;
   for (;;) {
     const DWORD wait = WaitForSingleObject(g_stopEvent, 2000);
     if (wait == WAIT_OBJECT_0) {
@@ -240,14 +256,44 @@ DWORD WINAPI SupervisorLoop(LPVOID) {
         g_helperSession = kInvalidSession;
       }
     }
-    if (session != g_helperSession) {
-      // 活动会话变化（登录/注销/切换用户）：清掉旧会话的 helper。
-      KillHelper();
+    if (session == g_helperSession) {
+      pendingSession = kInvalidSession;
+      pendingTicks = 0;
+      if (!helperAlive && session != kInvalidSession) {
+        SpawnHelper(session);  // 崩溃重启
+      }
+      continue;
+    }
+    if (g_helper == nullptr) {
+      // helper 不在而会话号有变（含刚消亡后控制台已切到新会话）：立即跟进，
+      // 不经过防抖；拉起失败下轮再试，日志按会话号去重防刷屏。
       if (session != kInvalidSession) {
+        if (session != pendingSession) {
+          rdDebug("service", "session switch %lu->%lu (helper down — immediate)",
+                  (unsigned long)g_helperSession, (unsigned long)session);
+        }
         SpawnHelper(session);
       }
-    } else if (!helperAlive && session != kInvalidSession) {
-      SpawnHelper(session);  // 崩溃重启
+      pendingSession = session;
+      pendingTicks = 0;
+      continue;
+    }
+    // 活 helper + 会话号不同：防抖，连续 3 次（6s）稳定才切换。
+    if (session == pendingSession) {
+      ++pendingTicks;
+      if (pendingTicks >= 3) {
+        rdDebug("service", "session switch confirmed %lu->%lu",
+                (unsigned long)g_helperSession, (unsigned long)session);
+        KillHelper();
+        if (session != kInvalidSession) {
+          SpawnHelper(session);
+        }
+        pendingSession = kInvalidSession;
+        pendingTicks = 0;
+      }
+    } else {
+      pendingSession = session;
+      pendingTicks = 1;
     }
   }
 }
@@ -269,6 +315,13 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
 
   LogOsVersion();
   EnableSystemPrivileges();
+  // 业务本体在服务内常驻（引擎/编码/面板管道，host_session），信令监听
+  // 由服务承载——两者都在 session 0，不随会话切换消亡。
+  // 端口与 STUN 来自 rd_host.ini（port=/stun=），缺省 48010；改动后需重启
+  // 服务生效。
+  const rdcfg::HostConfig cfg = rdcfg::LoadHostConfig();
+  rdhost::StartHostSession(cfg);
+  rdrelay::StartSignalRelay(cfg.port);
   g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   HANDLE thread = CreateThread(nullptr, 0, SupervisorLoop, nullptr, 0, nullptr);
 
@@ -280,6 +333,8 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
     WaitForSingleObject(thread, INFINITE);  // 循环因 STOP 事件返回
     CloseHandle(thread);
   }
+  rdrelay::StopSignalRelay();
+  rdhost::StopHostSession();
   KillHelper();
   rdDebug("service", "service stopped");
   ReportStatus(SERVICE_STOPPED);
@@ -316,6 +371,26 @@ void Notify(const std::wstring& text, bool quiet) {
     MessageBoxW(nullptr, text.c_str(), kServiceDisplay,
                 MB_OK | MB_ICONINFORMATION);
   }
+}
+
+// 防火墙规则：服务进程静默绑定端口不会触发防火墙弹窗，不加规则主控端
+// 连接会被静默丢弃。失败只落日志不阻断安装（用户可能自备规则）。
+// 删除只按规则名匹配（不带端口/程序），这样端口改过之后旧规则也能清掉；
+// 安装时先删再加，重装换端口不会残留同名旧规则。
+void AddFirewallRule(unsigned short port) {
+  std::wstring cmd = L"netsh advfirewall firewall add rule ";
+  cmd += L"name=RdHostServiceSignal dir=in action=allow ";
+  cmd += L"program=\"" + ExePath() + L"\" ";
+  cmd += L"protocol=TCP localport=" + std::to_wstring(port);
+  const int rc = _wsystem(cmd.c_str());
+  rdDebug("service", "firewall add port=%u rc=%d", (unsigned)port, rc);
+}
+
+void DeleteFirewallRule() {
+  std::wstring cmd =
+      L"netsh advfirewall firewall delete rule name=RdHostServiceSignal";
+  const int rc = _wsystem(cmd.c_str());
+  rdDebug("service", "firewall delete rc=%d", rc);
 }
 
 int DoInstall(bool quiet) {
@@ -366,6 +441,10 @@ int DoInstall(bool quiet) {
     Notify(L"被控服务安装并启动完成。\n\n控制面板（远程桌面程序 Host 页）"
            L"现在可以连接服务；锁屏 / UAC / 登录界面均可控。", quiet);
   }
+  // 端口来自 rd_host.ini：先删同名旧规则再按当前端口加，重装换端口不残留。
+  const rdcfg::HostConfig cfg = rdcfg::LoadHostConfig();
+  DeleteFirewallRule();
+  AddFirewallRule(cfg.port);
   CloseServiceHandle(svc);
   CloseServiceHandle(sc);
   return 0;
@@ -396,6 +475,7 @@ int DoUninstall(bool quiet) {
   CloseServiceHandle(svc);
   CloseServiceHandle(sc);
   KillLeftoverHelpers();
+  DeleteFirewallRule();
   Notify(deleted ? L"被控服务已卸载。" : L"服务已标记删除（重启后彻底移除）。",
          quiet);
   return 0;
