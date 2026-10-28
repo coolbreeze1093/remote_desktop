@@ -4,16 +4,18 @@
 #ifndef REMOTE_DESKTOP_UI_DIRECT_VIEWER_WINDOW_H_
 #define REMOTE_DESKTOP_UI_DIRECT_VIEWER_WINDOW_H_
 
+#include <QImage>
 #include <QStringList>
 #include <QVector>
 
 #include "ui/session_window.h"
 
 class QCloseEvent;
-class QComboBox;
+class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QVBoxLayout;
 
 namespace rd {
 
@@ -42,6 +44,8 @@ class DirectViewerWindow : public SessionWindow {
   bool startConnection(const QString& host, quint16 port);
   void loadAddressHistory();
   void rememberAddress(const QString& host, quint16 port);
+  void rebuildHistoryPanel();
+  void captureThumbnail(const QImage& image);
   void scheduleAutoReconnect(const QString& reason);
   void onAnswerReceived(const QString& answer);
   void onSignalingFailed(const QString& reason);
@@ -51,9 +55,14 @@ class DirectViewerWindow : public SessionWindow {
   void sendInputEvent(const rd::InputEvent& ev);
   void resetForRetry(const QString& statusText);
 
-  QComboBox* hostCombo_ = nullptr;  // 可编辑：下拉为最近连接过的地址历史
+  QLineEdit* hostEdit_ = nullptr;
   QLineEdit* portEdit_ = nullptr;
   QStringList history_;             // 最近连接地址（新在前，最多 kMaxHistory 条）
+  QWidget* historyBox_ = nullptr;   // 主界面空白区：历史连接卡片
+  QVBoxLayout* historyLay_ = nullptr;
+  QLabel* historyCaption_ = nullptr;
+  QHBoxLayout* historyCards_ = nullptr;
+  bool thumbCaptured_ = false;      // 本次连接是否已抓过缩略图
   QPushButton* connectBtn_ = nullptr;
   QPushButton* showVideoBtn_ = nullptr;  // 连接中重新弹出远端画面窗口
   QVector<qint64> screenIds_;           // 被控端屏幕列表（最近一次收到）

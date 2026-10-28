@@ -46,3 +46,4 @@ Thumbs.db
 # Third-party build artifacts (keep source, ignore build)
 third_party/*/build/
 third_party/*/deps/
+*.log

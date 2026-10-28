@@ -1,14 +1,18 @@
 #include "ui/direct_viewer_window.h"
 
+#include <QBuffer>
 #include <QCloseEvent>
-#include <QComboBox>
+#include <QCursor>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPushButton>
 #include <QSettings>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -28,8 +32,13 @@ constexpr quint16 kDefaultPort = 48010;
 // 长时间离线的情况。
 constexpr int kMaxAutoReconnects = 5;
 const int kRetryDelaysMs[] = {1500, 3000, 5000, 8000, 12000};
-// 历史连接记录条数（主界面下拉框展示，QSettings 持久化）。
+// 历史连接记录条数（主界面卡片展示，QSettings 持久化）。
 constexpr int kMaxHistory = 5;
+// 历史连接卡片尺寸（缩略图 16:9 + 下方地址文字）。
+constexpr int kThumbW = 192;
+constexpr int kThumbH = 108;
+constexpr int kCardW = 208;
+constexpr int kCardH = 150;
 
 // 拆 "host[:port]"：冒号后全为数字才视作端口（兼容在 IP 框直接粘 host:port）。
 bool splitAddress(const QString& text, QString* host, quint16* port) {
@@ -45,6 +54,58 @@ bool splitAddress(const QString& text, QString* host, quint16* port) {
   }
   *host = text;
   return !text.isEmpty();
+}
+
+// 把 QImage 居中裁剪缩放成卡片缩略图尺寸。
+QImage fitThumbnail(const QImage& image) {
+  const QImage scaled =
+      image.scaled(kThumbW, kThumbH, Qt::KeepAspectRatioByExpanding,
+                   Qt::SmoothTransformation);
+  return scaled.copy((scaled.width() - kThumbW) / 2,
+                     (scaled.height() - kThumbH) / 2, kThumbW, kThumbH);
+}
+
+// 卡片图标：优先用该地址上次连接时抓到的画面，没有则画深色显示器占位图；
+// 统一圆角裁剪，仿地址簿卡片风格。
+QPixmap makeCardIcon(const QString& entry) {
+  QImage thumb(kThumbW, kThumbH, QImage::Format_ARGB32_Premultiplied);
+  const QByteArray b64 =
+      QSettings(QStringLiteral("remote_desktop"), QStringLiteral("ui"))
+          .value(QStringLiteral("directViewer/thumbs/") + entry)
+          .toByteArray();
+  QImage stored;
+  if (!b64.isEmpty()) {
+    stored.loadFromData(QByteArray::fromBase64(b64), "JPEG");
+  }
+  if (!stored.isNull()) {
+    thumb = fitThumbnail(stored);
+  } else {
+    thumb.fill(QColor(0x1a, 0x24, 0x3a));
+    QPainter p(&thumb);
+    p.setRenderHint(QPainter::Antialiasing);
+    QLinearGradient grad(0, 0, 0, kThumbH);
+    grad.setColorAt(0, QColor(0x2b, 0x3a, 0x55));
+    grad.setColorAt(1, QColor(0x1a, 0x24, 0x3a));
+    p.fillRect(thumb.rect(), grad);
+    // 显示器轮廓 + 支架。
+    p.setPen(QPen(QColor(0x9c, 0xbe, 0xe6), 3));
+    p.setBrush(Qt::NoBrush);
+    p.drawRoundedRect(48, 24, 96, 56, 6, 6);
+    p.drawLine(76, 80, 116, 80);
+    p.drawLine(96, 80, 96, 90);
+    p.drawLine(70, 92, 122, 92);
+    p.end();
+  }
+  QPixmap result(kThumbW, kThumbH);
+  result.fill(Qt::transparent);
+  QPainter pp(&result);
+  pp.setRenderHint(QPainter::Antialiasing);
+  QPainterPath path;
+  path.addRoundedRect(0, 0, kThumbW, kThumbH, 8, 8);
+  pp.setClipPath(path);
+  pp.drawPixmap(0, 0, QPixmap::fromImage(thumb));
+  pp.end();
+  return result;
 }
 }  // namespace
 
@@ -158,29 +219,12 @@ QWidget* DirectViewerWindow::makeViewerPanel() {
     startConnection(autoHost_, autoPort_);
   });
 
-  // 连接行：IP（带历史下拉）+ 端口 + 连接按钮。
+  // 连接行：IP + 端口 + 连接按钮（历史连接在下方空白区以卡片展示）。
   auto* connRow = new QHBoxLayout();
   connRow->addWidget(new QLabel(tr("被控端 IP:"), panel));
-  hostCombo_ = new QComboBox(panel);
-  hostCombo_->setEditable(true);
-  hostCombo_->setInsertPolicy(QComboBox::NoInsert);
-  if (hostCombo_->lineEdit()) {
-    hostCombo_->lineEdit()->setPlaceholderText(tr("例如 192.168.1.20"));
-  }
-  loadAddressHistory();
-  // 从下拉选一条历史：填回 IP 与端口两个字段。
-  connect(hostCombo_, qOverload<int>(&QComboBox::activated), this,
-          [this](int index) {
-            QString host;
-            quint16 port = 0;
-            if (splitAddress(hostCombo_->itemText(index).trimmed(), &host,
-                             &port) &&
-                port > 0) {
-              hostCombo_->setCurrentText(host);
-              portEdit_->setText(QString::number(port));
-            }
-          });
-  connRow->addWidget(hostCombo_, 2);
+  hostEdit_ = new QLineEdit(panel);
+  hostEdit_->setPlaceholderText(tr("例如 192.168.1.20"));
+  connRow->addWidget(hostEdit_, 2);
   connRow->addWidget(new QLabel(tr("端口:"), panel));
   portEdit_ = new QLineEdit(QString::number(kDefaultPort), panel);
   connRow->addWidget(portEdit_, 1);
@@ -206,6 +250,31 @@ QWidget* DirectViewerWindow::makeViewerPanel() {
   lockHint_->hide();
   lay->addWidget(lockHint_);
 
+  // 历史连接：地址簿风格卡片（缩略图 + 地址），点击直连，右键删除单条。
+  historyBox_ = new QWidget(panel);
+  historyBox_->setStyleSheet(QStringLiteral(
+      "QToolButton { background: white; border: 1px solid #dcdcdc;"
+      "  border-radius: 8px; font-size: 9pt; }"
+      "QToolButton:hover { border: 1px solid #4a90d9; background: #f5f9ff; }"
+      "QToolButton:pressed { background: #e8f1fc; }"));
+  historyLay_ = new QVBoxLayout(historyBox_);
+  historyLay_->setContentsMargins(0, 16, 0, 0);
+  historyLay_->setSpacing(8);
+  historyCaption_ = new QLabel(tr("历史连接"), historyBox_);
+  historyCaption_->setStyleSheet(
+      QStringLiteral("color: #666666; font-weight: bold;"));
+  historyLay_->addWidget(historyCaption_);
+  historyCards_ = new QHBoxLayout();
+  historyCards_->setSpacing(12);
+  historyLay_->addLayout(historyCards_);
+  lay->addWidget(historyBox_);
+  lay->addStretch(1);
+  loadAddressHistory();  // 启动时已有历史则立即填充卡片
+
+  // 收到解码帧时抓首次画面做该地址的缩略图（与画面窗口同一信号源）。
+  connect(session_, &RemoteDesktopSession::frameReady, this,
+          &DirectViewerWindow::captureThumbnail, Qt::QueuedConnection);
+
   // 被控端锁屏状态提示（引擎派发线程触发）。
   connect(session_, &RemoteDesktopSession::peerSecureDesktopChanged, this,
           [this](bool secure, bool capturable) {
@@ -230,7 +299,7 @@ QWidget* DirectViewerWindow::makeViewerPanel() {
 }
 
 void DirectViewerWindow::autoConnect(const QString& host, quint16 port) {
-  hostCombo_->setCurrentText(host);
+  hostEdit_->setText(host);
   portEdit_->setText(QString::number(port));
   onToggleConnect();
 }
@@ -249,7 +318,7 @@ void DirectViewerWindow::onToggleConnect() {
   }
   QString host;
   quint16 port = 0;
-  if (!splitAddress(hostCombo_->currentText().trimmed(), &host, &port)) {
+  if (!splitAddress(hostEdit_->text().trimmed(), &host, &port)) {
     QMessageBox::information(this, tr("远程桌面"),
                              tr("请填写被控端 IP 与有效端口"));
     return;
@@ -273,9 +342,7 @@ void DirectViewerWindow::loadAddressHistory() {
   while (history_.size() > kMaxHistory) {
     history_.removeLast();
   }
-  hostCombo_->clear();
-  hostCombo_->addItems(history_);
-  hostCombo_->clearEditText();
+  rebuildHistoryPanel();
 }
 
 void DirectViewerWindow::rememberAddress(const QString& host, quint16 port) {
@@ -287,10 +354,81 @@ void DirectViewerWindow::rememberAddress(const QString& host, quint16 port) {
   }
   QSettings(QStringLiteral("remote_desktop"), QStringLiteral("ui"))
       .setValue(QStringLiteral("directViewer/recentAddresses"), history_);
-  // 下拉框同步刷新（不清编辑框，保留当前输入）。
-  hostCombo_->clear();
-  hostCombo_->addItems(history_);
-  hostCombo_->setCurrentText(host);
+  rebuildHistoryPanel();
+}
+
+void DirectViewerWindow::rebuildHistoryPanel() {
+  // 清空旧卡片后按 history_ 重建（缩略图 + 地址，点击直连，右键删除）。
+  while (QLayoutItem* item = historyCards_->takeAt(0)) {
+    if (QWidget* w = item->widget()) {
+      w->deleteLater();
+    }
+    delete item;
+  }
+  if (history_.isEmpty()) {
+    historyBox_->hide();
+    return;
+  }
+  for (const QString& entry : history_) {
+    auto* card = new QToolButton(historyBox_);
+    card->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+    card->setIcon(makeCardIcon(entry));
+    card->setIconSize(QSize(kThumbW, kThumbH));
+    card->setText(entry);
+    card->setFixedSize(kCardW, kCardH);
+    connect(card, &QToolButton::clicked, this, [this, entry] {
+      QString host;
+      quint16 port = 0;
+      if (!splitAddress(entry, &host, &port) || port == 0) {
+        return;
+      }
+      hostEdit_->setText(host);
+      portEdit_->setText(QString::number(port));
+      startConnection(host, port);  // 已连接时由 startConnection 先拆旧会话
+    });
+    card->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(card, &QToolButton::customContextMenuRequested, this,
+            [this, card, entry] {
+              QMenu menu(card);
+              QAction* del = menu.addAction(tr("删除这条记录"));
+              if (menu.exec(QCursor::pos()) != del) {
+                return;
+              }
+              history_.removeOne(entry);
+              QSettings(QStringLiteral("remote_desktop"),
+                        QStringLiteral("ui"))
+                  .setValue(QStringLiteral("directViewer/recentAddresses"),
+                            history_);
+              QSettings(QStringLiteral("remote_desktop"),
+                        QStringLiteral("ui"))
+                  .remove(QStringLiteral("directViewer/thumbs/") + entry);
+              rebuildHistoryPanel();
+            });
+    historyCards_->addWidget(card);
+  }
+  historyCards_->addStretch(1);
+  historyBox_->show();
+}
+
+// 连接建立后收到首批解码帧时，抓第一帧做该地址的卡片缩略图（JPEG 存储）。
+void DirectViewerWindow::captureThumbnail(const QImage& image) {
+  if (thumbCaptured_ || autoPort_ == 0 || image.isNull()) {
+    return;
+  }
+  thumbCaptured_ = true;
+  const QImage thumb = fitThumbnail(image);
+  QBuffer buf;
+  if (!thumb.save(&buf, "JPEG", 85)) {
+    return;
+  }
+  const QString entry =
+      QStringLiteral("%1:%2").arg(autoHost_).arg(autoPort_);
+  QSettings(QStringLiteral("remote_desktop"), QStringLiteral("ui"))
+      .setValue(QStringLiteral("directViewer/thumbs/") + entry,
+                buf.data().toBase64());
+  if (history_.contains(entry)) {
+    rebuildHistoryPanel();  // 卡片已在列表中：刷新图标
+  }
 }
 
 bool DirectViewerWindow::startConnection(const QString& host, quint16 port) {
@@ -317,6 +455,7 @@ bool DirectViewerWindow::startConnection(const QString& host, quint16 port) {
   }
   autoHost_ = host;
   autoPort_ = port;
+  thumbCaptured_ = false;  // 新会话重抓缩略图
   ++autoAttempts_;
   connecting_ = true;
   connectBtn_->setText(tr("取消"));
