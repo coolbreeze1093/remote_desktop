@@ -8,6 +8,7 @@
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QTimer>
+#include <QVector>
 
 #include "../debug_log.h"
 
@@ -79,6 +80,26 @@ void RemoteVideoWindow::buildToolbar() {
           });
   lay->addWidget(cursorLabel);
   lay->addWidget(cursorCombo_);
+  // 画质档位（0=自动 1=超清 2=高清 3=流畅）：切换经主窗口转发给会话，
+  // 会话不存档位，重连后由主窗口用 currentQualityMode() 重放。
+  qualityLabel_ = new QLabel(tr("画质"), toolbar_);
+  qualityCombo_ = new QComboBox(toolbar_);
+  qualityCombo_->addItem(tr("自动"), 0);
+  qualityCombo_->addItem(tr("超清"), 1);
+  qualityCombo_->addItem(tr("高清"), 2);
+  qualityCombo_->addItem(tr("流畅"), 3);
+  connect(qualityCombo_, QOverload<int>::of(&QComboBox::activated), this,
+          [this](int) { emit qualityModeSelected(currentQualityMode()); });
+  lay->addWidget(qualityLabel_);
+  lay->addWidget(qualityCombo_);
+  // 被控端屏幕（仅直连主控端显示）：切换后由主窗口决定如何生效（换屏重连）。
+  screenLabel_ = new QLabel(tr("屏幕"), toolbar_);
+  screenCombo_ = new QComboBox(toolbar_);
+  screenCombo_->addItem(tr("被控端默认（连接后自动获取列表）"), 0);
+  connect(screenCombo_, QOverload<int>::of(&QComboBox::activated), this,
+          [this](int) { emit screenSelected(currentScreenId()); });
+  lay->addWidget(screenLabel_);
+  lay->addWidget(screenCombo_);
   fullscreenBtn_ = new QPushButton(tr("退出全屏"), toolbar_);
   fullscreenBtn_->setObjectName("fullscreenBtn");
   disconnectBtn_ = new QPushButton(tr("断开连接"), toolbar_);
@@ -104,6 +125,52 @@ void RemoteVideoWindow::setFrame(const QImage& image) {
 
 void RemoteVideoWindow::setDiagText(const QString& text) {
   video_->setDiagText(text);
+}
+
+int RemoteVideoWindow::currentQualityMode() const {
+  return qualityCombo_ ? qualityCombo_->currentData().toInt() : 0;
+}
+
+qint64 RemoteVideoWindow::currentScreenId() const {
+  return screenCombo_ ? screenCombo_->currentData().toLongLong() : 0;
+}
+
+QString RemoteVideoWindow::screenTitle() const {
+  return screenCombo_ ? screenCombo_->currentText()
+                      : tr("被控端默认");
+}
+
+void RemoteVideoWindow::setScreens(const QVector<qint64>& ids,
+                                   const QStringList& titles) {
+  if (!screenCombo_) {
+    return;
+  }
+  screenCombo_->blockSignals(true);
+  const QString prev = screenCombo_->currentText();
+  screenCombo_->clear();
+  for (int i = 0; i < ids.size(); ++i) {
+    QString name = i < titles.size() ? titles[i] : QString();
+    if (name.isEmpty()) {
+      name = tr("屏幕 %1").arg(i + 1);
+    }
+    screenCombo_->addItem(name, QVariant::fromValue<qint64>(ids[i]));
+  }
+  int idx = screenCombo_->findText(prev);
+  if (idx < 0) {
+    idx = 0;
+  }
+  screenCombo_->setCurrentIndex(idx);
+  screenCombo_->setEnabled(true);
+  screenCombo_->blockSignals(false);
+}
+
+void RemoteVideoWindow::setScreenSelectorVisible(bool visible) {
+  if (screenLabel_) {
+    screenLabel_->setVisible(visible);
+  }
+  if (screenCombo_) {
+    screenCombo_->setVisible(visible);
+  }
 }
 
 void RemoteVideoWindow::showFullscreen() {

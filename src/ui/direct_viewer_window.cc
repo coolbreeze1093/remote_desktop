@@ -1,12 +1,12 @@
 #include "ui/direct_viewer_window.h"
 
 #include <QCloseEvent>
-#include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSettings>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -93,6 +93,27 @@ QWidget* DirectViewerWindow::makeViewerPanel() {
           &RemoteVideoWindow::setRemoteCursorShape, Qt::QueuedConnection);
   connect(videoWindow_, &RemoteVideoWindow::inputEvent, this,
           &DirectViewerWindow::sendInputEvent);
+  // 弹窗工具栏的画质档位 → 会话（控制通道下发到被控端编码器）。
+  connect(videoWindow_, &RemoteVideoWindow::qualityModeSelected, this,
+          [this](int mode) { session_->setVideoQualityMode(mode); });
+  // 弹窗内切换被控端屏幕：屏幕 id 只能随 Offer 生效，会话中切换即换屏
+  // 重连（信令断开→服务端重拉 helper→新 Offer 带上所选屏幕）。
+  connect(videoWindow_, &RemoteVideoWindow::screenSelected, this,
+          [this](qint64 screenId) {
+            if (session_->role() == RemoteDesktopSession::Role::None ||
+                connecting_ || autoPort_ == 0) {
+              return;  // 未连接时选择只影响下一次 Offer
+            }
+            rdDebug("direct-viewer", "switch screen -> %lld, reconnecting",
+                    (long long)screenId);
+            userStopped_ = false;
+            autoAttempts_ = 0;  // 换屏重连给满重试次数
+            reconnectTimer_->stop();
+            signaling_->sendBye();
+            session_->stop();
+            signaling_->abort();
+            startConnection(autoHost_, autoPort_);
+          });
   connect(videoWindow_, &RemoteVideoWindow::disconnectRequested, this, [this] {
     if (session_->role() != RemoteDesktopSession::Role::None) {
       userStopped_ = true;
@@ -132,32 +153,6 @@ QWidget* DirectViewerWindow::makeViewerPanel() {
           &DirectViewerWindow::onToggleConnect);
   connRow->addWidget(connectBtn_);
   lay->addLayout(connRow);
-
-  // 画质选择：0=auto（自适应阶梯），1=超清 2=高清 3=流畅。
-  auto* qualityRow = new QHBoxLayout();
-  qualityRow->addWidget(new QLabel(tr("画质:"), panel));
-  qualityBox_ = new QComboBox(panel);
-  qualityBox_->addItem(tr("自动（根据网络和负载调节）"), 0);
-  qualityBox_->addItem(tr("超清（原生分辨率）"), 1);
-  qualityBox_->addItem(tr("高清"), 2);
-  qualityBox_->addItem(tr("流畅"), 3);
-  connect(qualityBox_, qOverload<int>(&QComboBox::activated), this,
-          [this](int index) {
-            session_->setVideoQualityMode(qualityBox_->itemData(index).toInt());
-          });
-  qualityRow->addWidget(qualityBox_, 1);
-  lay->addLayout(qualityRow);
-
-  // 被控端屏幕选择：连接时自动向被控端查询屏幕列表（服务模式由 relay 应答），
-  // 选中项随 Offer 带给 helper；拉不到列表时按老格式发（= 被控端默认屏）。
-  auto* screenRow = new QHBoxLayout();
-  screenRow->addWidget(new QLabel(tr("被控端屏幕:"), panel));
-  screenBox_ = new QComboBox(panel);
-  screenBox_->addItem(tr("被控端默认（连接后自动获取列表）"), 0);
-  screenBox_->setEnabled(false);
-  screenBox_->setToolTip(tr("连接后自动获取被控端屏幕列表；重连沿用当前选择"));
-  screenRow->addWidget(screenBox_, 1);
-  lay->addLayout(screenRow);
 
   stateLabel_ = new QLabel(panel);
   stateLabel_->setWordWrap(true);
@@ -282,25 +277,8 @@ void DirectViewerWindow::onScreensReceived(const QVector<qint64>& screenIds,
           (long long)screenIds.size());
   screensKnown_ = true;
   screenIds_ = screenIds;
-  const QString prev = screenBox_->currentText();
-  screenBox_->blockSignals(true);
-  screenBox_->clear();
-  for (int i = 0; i < screenIds.size(); ++i) {
-    QString name = i < screenTitles.size() ? screenTitles[i] : QString();
-    if (name.isEmpty()) {
-      name = tr("屏幕 %1").arg(i + 1);
-    }
-    screenBox_->addItem(name, QVariant::fromValue<qint64>(screenIds[i]));
-  }
-  // 重连沿用上次选择；首次默认第一个真实屏幕（避开 SCL_SCREEN_DEFAULT 在
-  // 个别环境失效的问题）。
-  int idx = screenBox_->findText(prev);
-  if (idx < 0) {
-    idx = 0;
-  }
-  screenBox_->setCurrentIndex(idx);
-  screenBox_->blockSignals(false);
-  screenBox_->setEnabled(true);
+  // 列表填入远端画面弹窗的工具栏下拉框（保留当前选择；重连沿用）。
+  videoWindow_->setScreens(screenIds, screenTitles);
   if (!offerSent_) {
     sendOfferNow();
   }
@@ -314,14 +292,13 @@ void DirectViewerWindow::sendOfferNow() {
   if (screensTimer_) {
     screensTimer_->stop();
   }
-  if (screensKnown_ && screenBox_->currentIndex() >= 0 &&
-      screenBox_->currentIndex() < screenIds_.size()) {
-    const qint64 id = screenIds_[screenBox_->currentIndex()];
+  if (screensKnown_ && videoWindow_->currentScreenId() != 0) {
+    const qint64 id = videoWindow_->currentScreenId();
     rdDebug("direct-viewer",
             "signaling connected, sending offer len=%d screen=%lld",
             pendingOffer_.size(), (long long)id);
     setStatus(tr("已连上服务端，交换信令中（屏幕：%1）...")
-                  .arg(screenBox_->currentText()));
+                  .arg(videoWindow_->screenTitle()));
     signaling_->sendOfferWithScreen(pendingOffer_, id);
   } else {
     rdDebug("direct-viewer", "signaling connected, sending offer len=%d (host default screen)",
@@ -377,6 +354,8 @@ void DirectViewerWindow::onSessionConnected() {
   // 连接建立即弹出独立远端画面窗口（工具栏可退出全屏）。
   videoWindow_->showFullscreen();
   showVideoBtn_->show();
+  // 引擎随会话重建，档位回到默认：重放弹窗里用户选的档位。
+  session_->setVideoQualityMode(videoWindow_->currentQualityMode());
 }
 
 void DirectViewerWindow::onSessionDisconnected() {

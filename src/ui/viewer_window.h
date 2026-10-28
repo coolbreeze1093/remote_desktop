@@ -6,7 +6,6 @@
 
 #include "ui/session_window.h"
 
-class QComboBox;
 class QLabel;
 class QPlainTextEdit;
 class QPushButton;
@@ -36,7 +35,6 @@ class ViewerWindow : public SessionWindow {
   RemoteVideoWindow* videoWindow_ = nullptr;
 
   // Viewer widgets
-  QComboBox* qualityBox_ = nullptr;       // 自动/超清/高清/流畅
   QPlainTextEdit* viewerOffer_ = nullptr;
   QPlainTextEdit* viewerAnswer_ = nullptr;
   QPushButton* viewerOfferBtn_ = nullptr;

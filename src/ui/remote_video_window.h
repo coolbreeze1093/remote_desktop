@@ -5,12 +5,15 @@
 #define REMOTE_DESKTOP_UI_REMOTE_VIDEO_WINDOW_H_
 
 #include <QImage>
+#include <QStringList>
+#include <QVector>
 #include <QWidget>
 
 #include "core/input_event.h"
 #include "ui/video_widget.h"
 
 class QComboBox;
+class QLabel;
 class QPushButton;
 class QTimer;
 
@@ -36,6 +39,18 @@ class RemoteVideoWindow : public QWidget {
   // Diagnostic line shown while no frame has been displayed yet.
   void setDiagText(const QString& text);
 
+  // ---- 会话控制控件（画质 / 被控端屏幕）----
+  // 用户在工具栏切换画质档位（0=自动 1=超清 2=高清 3=流畅）。
+  int currentQualityMode() const;
+  // 填充被控端屏幕列表（保留当前选择；空列表保持占位项）。
+  void setScreens(const QVector<qint64>& ids, const QStringList& titles);
+  // 当前选中的屏幕 id（0 = 被控端默认）。
+  qint64 currentScreenId() const;
+  // 当前选中的屏幕名称（状态栏展示用；未知时返回占位文案）。
+  QString screenTitle() const;
+  // 屏幕选择是否可见（rd_viewer 的屏幕由被控端选，隐藏此项）。
+  void setScreenSelectorVisible(bool visible);
+
   // Pops the window up fullscreen (used when the session connects).
   void showFullscreen();
 
@@ -47,6 +62,10 @@ class RemoteVideoWindow : public QWidget {
   void inputEvent(const rd::InputEvent& ev);
   // User clicked "断开连接" or closed the window.
   void disconnectRequested();
+  // 用户切换画质档位（主窗口接到后转发给会话）。
+  void qualityModeSelected(int mode);
+  // 用户切换被控端屏幕（主窗口决定如何生效：直连=换屏重连）。
+  void screenSelected(qint64 screenId);
 
  protected:
   bool eventFilter(QObject* watched, QEvent* event) override;
@@ -61,9 +80,13 @@ class RemoteVideoWindow : public QWidget {
 
   VideoWidget* video_ = nullptr;
   QWidget* toolbar_ = nullptr;
+  QComboBox* cursorCombo_ = nullptr;
+  QComboBox* qualityCombo_ = nullptr;
+  QComboBox* screenCombo_ = nullptr;
+  QLabel* qualityLabel_ = nullptr;
+  QLabel* screenLabel_ = nullptr;
   QPushButton* fullscreenBtn_ = nullptr;
   QPushButton* disconnectBtn_ = nullptr;
-  QComboBox* cursorCombo_ = nullptr;
   QTimer* hideTimer_ = nullptr;
 };
 

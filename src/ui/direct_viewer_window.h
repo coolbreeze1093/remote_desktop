@@ -10,7 +10,6 @@
 #include "ui/session_window.h"
 
 class QCloseEvent;
-class QComboBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -53,9 +52,7 @@ class DirectViewerWindow : public SessionWindow {
   QLineEdit* portEdit_ = nullptr;
   QPushButton* connectBtn_ = nullptr;
   QPushButton* showVideoBtn_ = nullptr;  // 连接中重新弹出远端画面窗口
-  QComboBox* qualityBox_ = nullptr;
-  QComboBox* screenBox_ = nullptr;      // 被控端屏幕（连接时自动拉列表）
-  QVector<qint64> screenIds_;           // 与 screenBox_ 条目一一对应
+  QVector<qint64> screenIds_;           // 被控端屏幕列表（最近一次收到）
   bool screensKnown_ = false;           // 已拿到被控端屏幕列表
   bool offerSent_ = false;              // 本次信令连接是否已发出 Offer
   QTimer* screensTimer_ = nullptr;      // 列表超时兑底（超时按默认屏发 Offer）

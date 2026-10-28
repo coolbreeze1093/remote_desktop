@@ -1,6 +1,5 @@
 #include "ui/viewer_window.h"
 
-#include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
@@ -33,6 +32,11 @@ ViewerWindow::ViewerWindow(QWidget* parent) : SessionWindow(parent) {
   // Forward mouse/keyboard on the remote video to the host.
   connect(videoWindow_, &RemoteVideoWindow::inputEvent, this,
           &ViewerWindow::sendInputEvent);
+  // 弹窗工具栏的画质档位 → 会话（控制通道下发到被控端编码器）。
+  connect(videoWindow_, &RemoteVideoWindow::qualityModeSelected, this,
+          [this](int mode) { session_->setVideoQualityMode(mode); });
+  // rd_viewer 的共享屏幕由被控端选定，弹窗内不显示屏幕切换。
+  videoWindow_->setScreenSelectorVisible(false);
 
   // 宿主锁屏状态（引擎派发线程触发）：操作者在主控端看到的反馈。
   connect(session_, &RemoteDesktopSession::peerSecureDesktopChanged, this,
@@ -68,6 +72,8 @@ void ViewerWindow::onSessionConnected() {
   // 连接建立即弹出独立远端画面窗口（工具栏可退出全屏）。
   videoWindow_->showFullscreen();
   viewerShowVideoBtn_->show();
+  // 引擎随会话重建，档位回到默认：重放弹窗里用户选的档位。
+  session_->setVideoQualityMode(videoWindow_->currentQualityMode());
 }
 
 void ViewerWindow::onSessionDisconnected() {
@@ -82,22 +88,6 @@ void ViewerWindow::applyDiagText(const QString& text) {
 QWidget* ViewerWindow::makeViewerTab() {
   auto* panel = new QWidget();
   auto* lay = new QVBoxLayout(panel);
-
-  // Quality selector: 0=auto (adaptive ladder), 1=超清(native), 2=高清,
-  // 3=流畅. Applied on the host encoder; sent over the control channel.
-  auto* qualityRow = new QHBoxLayout();
-  qualityRow->addWidget(new QLabel(tr("画质:"), panel));
-  qualityBox_ = new QComboBox(panel);
-  qualityBox_->addItem(tr("自动（根据网络和负载调节）"), 0);
-  qualityBox_->addItem(tr("超清（原生分辨率）"), 1);
-  qualityBox_->addItem(tr("高清"), 2);
-  qualityBox_->addItem(tr("流畅"), 3);
-  connect(qualityBox_, qOverload<int>(&QComboBox::activated), this,
-          [this](int index) {
-            session_->setVideoQualityMode(qualityBox_->itemData(index).toInt());
-          });
-  qualityRow->addWidget(qualityBox_, 1);
-  lay->addLayout(qualityRow);
 
   stateLabel_ =
       new QLabel(tr("1) 创建 Offer 发给被控端，2) 粘贴 Answer 并连接"), panel);
