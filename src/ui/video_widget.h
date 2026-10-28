@@ -64,6 +64,8 @@ class VideoWidget : public QWidget {
   QRect videoRect() const;
   QPointF toNormalised(const QPointF& widgetPos) const;
   void emitMouseMove(const QPointF& n);
+  // 本地预测渲染：光标立即画在本地指针位置，不等宿主回报。
+  void predictLocalCursor(const QPointF& n);
 
   // ---- 远端注入状态跟踪（焦点丢失时按状态补齐抬起） ----
   // 把事件携带的修饰键状态与已注入状态做差量同步：缺的补按下，多的补抬起。
@@ -85,6 +87,8 @@ class VideoWidget : public QWidget {
   double cursorNx_ = 0;
   double cursorNy_ = 0;
   bool cursorVisible_ = false;
+  // 最近一次本地鼠标操作时刻（本地预测渲染的有效期判定）。
+  qint64 lastLocalInputMs_ = 0;
   // Mouse-move throttle: at most one move per interval, plus a final move
   // when the pointer stops (keeps latency low without flooding the channel).
   qint64 lastMoveMs_ = 0;

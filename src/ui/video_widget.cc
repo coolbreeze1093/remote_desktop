@@ -20,10 +20,13 @@ namespace rd {
 
 namespace {
 
-// At most ~60 move events per second are sent; the final position is flushed
-// shortly after the pointer stops so slow links stay responsive.
-constexpr int kMoveIntervalMs = 16;
+// At most one move event per kMoveIntervalMs is sent; the final position is
+// flushed shortly after the pointer stops so the remote cursor lands exactly.
+constexpr int kMoveIntervalMs = 10;
 constexpr int kMoveFlushMs = 40;
+// 本地预测有效期：操作后这段时间内的宿主回报视作“过去的位置”丢弃，
+// 停稳后回报才用于校准落点（修正注入失败/坐标截断等漂移）。
+constexpr int kPredictionHoldMs = 150;
 
 int mapQtButton(Qt::MouseButton b) {
   switch (b) {
@@ -186,9 +189,28 @@ void VideoWidget::setFrame(const QImage& image) {
 }
 
 void VideoWidget::setRemoteCursorPos(double nx, double ny, bool visible) {
+  // 本地操作活跃期内丢弃宿主回报：回报走完整条网络往返，位置是滞后的，
+  // 和本地预测叠加会让光标来回跳；停稳 kPredictionHoldMs 后恢复采用，
+  // 由宿主真实位置校准落点。
+  if (QDateTime::currentMSecsSinceEpoch() - lastLocalInputMs_ <
+      kPredictionHoldMs) {
+    return;
+  }
   cursorNx_ = nx;
   cursorNy_ = ny;
   cursorVisible_ = visible;
+  update();
+}
+
+void VideoWidget::predictLocalCursor(const QPointF& n) {
+  // 本地预测渲染：光标立即画在本地指针位置，不等「发送→注入→回报」一圈
+  // 回来（那会背上整个网络往返延迟，表现为光标滞后于手）。注入坐标用的
+  // 就是同一个归一化位置，预测与远端真实位置一致；漂移由停稳后的宿主
+  // 回报校准。
+  lastLocalInputMs_ = QDateTime::currentMSecsSinceEpoch();
+  cursorNx_ = n.x();
+  cursorNy_ = n.y();
+  cursorVisible_ = true;
   update();
 }
 
@@ -249,6 +271,7 @@ void VideoWidget::mouseMoveEvent(QMouseEvent* e) {
   const QPointF n = toNormalised(e->localPos());
   lastNx_ = n.x();
   lastNy_ = n.y();
+  predictLocalCursor(n);
   const qint64 now = QDateTime::currentMSecsSinceEpoch();
   if (now - lastMoveMs_ >= kMoveIntervalMs) {
     lastMoveMs_ = now;
@@ -264,6 +287,7 @@ void VideoWidget::mousePressEvent(QMouseEvent* e) {
   const QPointF n = toNormalised(e->localPos());
   lastNx_ = n.x();
   lastNy_ = n.y();
+  predictLocalCursor(n);
   // Ctrl+click 多选 / Shift+click 范围选择等组合先差量同步修饰键。
   syncModifiers(e->modifiers());
   sendMouseButton(mapQtButton(e->button()), true, n.x(), n.y());
@@ -273,6 +297,7 @@ void VideoWidget::mouseReleaseEvent(QMouseEvent* e) {
   const QPointF n = toNormalised(e->localPos());
   lastNx_ = n.x();
   lastNy_ = n.y();
+  predictLocalCursor(n);
   syncModifiers(e->modifiers());
   sendMouseButton(mapQtButton(e->button()), false, n.x(), n.y());
 }
@@ -284,6 +309,7 @@ void VideoWidget::mouseDoubleClickEvent(QMouseEvent* e) {
   const QPointF n = toNormalised(e->localPos());
   lastNx_ = n.x();
   lastNy_ = n.y();
+  predictLocalCursor(n);
   syncModifiers(e->modifiers());
   sendMouseButton(mapQtButton(e->button()), true, n.x(), n.y());
 
