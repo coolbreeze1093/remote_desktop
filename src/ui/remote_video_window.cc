@@ -1,8 +1,10 @@
 #include "ui/remote_video_window.h"
 
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QEvent>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QTimer>
@@ -48,10 +50,35 @@ void RemoteVideoWindow::buildToolbar() {
       "  border: none; border-radius: 6px; padding: 6px 16px; }"
       "QPushButton:hover { background: rgba(96, 102, 114, 230); }"
       "QPushButton#disconnectBtn { background: rgba(150, 52, 52, 220); }"
-      "QPushButton#disconnectBtn:hover { background: rgba(190, 70, 70, 240); }");
+      "QPushButton#disconnectBtn:hover { background: rgba(190, 70, 70, 240); }"
+      "QLabel { color: white; background: transparent; }"
+      "QComboBox { color: white; background: rgba(62, 66, 76, 210);"
+      "  border: none; border-radius: 6px; padding: 4px 8px; }"
+      "QComboBox QAbstractItemView { background: #262a32; color: white;"
+      "  selection-background-color: #3e424c; }");
   auto* lay = new QHBoxLayout(toolbar_);
   lay->setContentsMargins(12, 6, 12, 6);
   lay->setSpacing(10);
+  // 光标大小：1.0 = 与本地系统光标等大，默认 0.8（观感更自然）；
+  // 全局生效并持久化，预览与全屏窗口同步。
+  auto* cursorLabel = new QLabel(tr("光标"), toolbar_);
+  cursorCombo_ = new QComboBox(toolbar_);
+  const QList<double> scales = {0.6, 0.8, 1.0, 1.25};
+  const QStringList names = {"60%", "80%", "100%", "125%"};
+  int cur = 1;
+  for (int i = 0; i < scales.size(); ++i) {
+    cursorCombo_->addItem(names[i], scales[i]);
+    if (qAbs(scales[i] - VideoWidget::cursorScale()) < 0.01) {
+      cur = i;
+    }
+  }
+  cursorCombo_->setCurrentIndex(cur);
+  connect(cursorCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, [this](int idx) {
+            VideoWidget::setCursorScale(cursorCombo_->itemData(idx).toDouble());
+          });
+  lay->addWidget(cursorLabel);
+  lay->addWidget(cursorCombo_);
   fullscreenBtn_ = new QPushButton(tr("退出全屏"), toolbar_);
   fullscreenBtn_->setObjectName("fullscreenBtn");
   disconnectBtn_ = new QPushButton(tr("断开连接"), toolbar_);
@@ -63,8 +90,11 @@ void RemoteVideoWindow::buildToolbar() {
 
   connect(fullscreenBtn_, &QPushButton::clicked, this,
           &RemoteVideoWindow::toggleFullscreen);
-  connect(disconnectBtn_, &QPushButton::clicked, this,
-          [this] { emit disconnectRequested(); });
+  connect(disconnectBtn_, &QPushButton::clicked, this, [this] {
+    emit disconnectRequested();
+    // 断开连接后窗口自己关闭（会话收尾由主窗口的 disconnectRequested 处理）。
+    close();
+  });
 }
 
 void RemoteVideoWindow::setFrame(const QImage& image) {

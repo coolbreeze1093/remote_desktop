@@ -1,11 +1,13 @@
 #include "ui/video_widget.h"
 
+#include <QApplication>
 #include <QDateTime>
 #include <QFocusEvent>
 #include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QSettings>
 #include <QTimer>
 #include <QVariant>
 #include <QWheelEvent>
@@ -24,6 +26,12 @@ namespace {
 // flushed shortly after the pointer stops so the remote cursor lands exactly.
 constexpr int kMoveIntervalMs = 10;
 constexpr int kMoveFlushMs = 40;
+
+// 远端光标呈现倍率：1.0 = 与本地系统光标格等大（SM_CXCURSOR/SM_CYCURSOR）。
+// 默认 0.8（实测 1.0 观感略大）；进程内全局，QSettings 持久化。
+constexpr double kCursorScaleDefault = 0.8;
+double g_cursorScale = -1.0;  // 惰性从 QSettings 加载
+
 // 本地预测有效期：操作后这段时间内的宿主回报视作“过去的位置”丢弃，
 // 停稳后回报才用于校准落点（修正注入失败/坐标截断等漂移）。
 constexpr int kPredictionHoldMs = 150;
@@ -219,7 +227,35 @@ void VideoWidget::setRemoteCursorShape(const QImage& image, int hotspotX,
   cursorImage_ = image;
   cursorHotX_ = hotspotX;
   cursorHotY_ = hotspotY;
+  // 一次性记录尺寸链路，光标大小观感异常时可直接对照。
+  static std::atomic<int> dbg{0};
+  if (dbg.fetch_add(1) < 3) {
+    rdDebug("video", "cursor shape %dx%d hot(%d,%d) localCell=%dx%d scale=%.2f",
+            image.width(), image.height(), hotspotX, hotspotY,
+            GetSystemMetrics(SM_CXCURSOR), GetSystemMetrics(SM_CYCURSOR),
+            cursorScale());
+  }
   update();
+}
+
+double VideoWidget::cursorScale() {
+  if (g_cursorScale < 0) {
+    g_cursorScale = qBound(0.3, QSettings("remote_desktop", "ui")
+                                     .value("cursorScale", kCursorScaleDefault)
+                                     .toDouble(),
+                           2.5);
+  }
+  return g_cursorScale;
+}
+
+void VideoWidget::setCursorScale(double s) {
+  g_cursorScale = qBound(0.3, s, 2.5);
+  QSettings("remote_desktop", "ui").setValue("cursorScale", g_cursorScale);
+  for (QWidget* top : QApplication::topLevelWidgets()) {
+    for (VideoWidget* v : top->findChildren<VideoWidget*>()) {
+      v->update();
+    }
+  }
 }
 
 void VideoWidget::paintEvent(QPaintEvent*) {
@@ -237,15 +273,22 @@ void VideoWidget::paintEvent(QPaintEvent*) {
   p.setRenderHint(QPainter::SmoothPixmapTransform);
   const QRect r = videoRect();
   p.drawImage(r, frame_);
-  // 远端光标叠加绘制（宿主侧不再把光标烤进视频）：形态始终按原生像素
-  // 1:1 绘制（大小与被控端屏幕上一致，不随视频缩放/全屏窗口放大），
-  // 位置仍按视频缩放比映射到画面上，越界（多屏时光标在采集屏外）不画。
+  // 远端光标叠加绘制（宿主侧不再把光标烤进视频）：远端位图是宿主端物理
+  // 像素，大小随宿主 DPI/指针设置走，直接 1:1 画会因两端 DPI/分辨率差异
+  // 显得过大。基准是本地系统光标格（呈现与本地光标等大），再乘用户倍率
+  // cursorScale()；热点按同比例缩放，位置仍按视频缩放比映射，越界不画。
   if (cursorVisible_ && !cursorImage_.isNull()) {
     if (cursorNx_ >= 0.0 && cursorNx_ <= 1.0 && cursorNy_ >= 0.0 &&
         cursorNy_ <= 1.0) {
+      const double base = cursorScale();
+      const double sw =
+          GetSystemMetrics(SM_CXCURSOR) / double(cursorImage_.width()) * base;
+      const double sh =
+          GetSystemMetrics(SM_CYCURSOR) / double(cursorImage_.height()) * base;
       p.drawImage(
-          QPointF(r.left() + cursorNx_ * r.width() - cursorHotX_,
-                  r.top() + cursorNy_ * r.height() - cursorHotY_),
+          QRectF(r.left() + cursorNx_ * r.width() - cursorHotX_ * sw,
+                 r.top() + cursorNy_ * r.height() - cursorHotY_ * sh,
+                 cursorImage_.width() * sw, cursorImage_.height() * sh),
           cursorImage_);
     }
   }

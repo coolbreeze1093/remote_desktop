@@ -30,6 +30,11 @@ class VideoWidget : public QWidget {
   // counters) so a dead pipeline stage is visible on screen.
   void setDiagText(const QString& text) { diagText_ = text; update(); }
 
+  // 远端光标呈现大小（相对本地系统光标格的倍率，1.0 = 与本地光标等大）。
+  // 进程内全局生效（预览与全屏窗口同步），并写入 QSettings 持久化。
+  static double cursorScale();
+  static void setCursorScale(double s);
+
  public slots:
   void setFrame(const QImage& image);
 

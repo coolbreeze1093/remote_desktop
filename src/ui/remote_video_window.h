@@ -10,6 +10,7 @@
 #include "core/input_event.h"
 #include "ui/video_widget.h"
 
+class QComboBox;
 class QPushButton;
 class QTimer;
 
@@ -62,6 +63,7 @@ class RemoteVideoWindow : public QWidget {
   QWidget* toolbar_ = nullptr;
   QPushButton* fullscreenBtn_ = nullptr;
   QPushButton* disconnectBtn_ = nullptr;
+  QComboBox* cursorCombo_ = nullptr;
   QTimer* hideTimer_ = nullptr;
 };
 
